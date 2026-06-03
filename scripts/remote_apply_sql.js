@@ -25,6 +25,7 @@ function parseArgs(argv) {
 function loadSsh2(moduleDir) {
   const candidates = [];
   if (moduleDir) candidates.push(path.resolve(moduleDir, 'ssh2'));
+  candidates.push(path.resolve('tmp/ssh-tools/node_modules', 'ssh2'));
   candidates.push('ssh2');
   candidates.push('C:/Users/fengyu/AppData/Local/Temp/codex-ssh-client/node_modules/ssh2');
 

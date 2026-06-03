@@ -22,16 +22,19 @@ function parseArgs(argv) {
 }
 
 function loadSsh2(moduleDir) {
-  const candidates = [path.resolve(moduleDir || 'tmp/ssh-tools/node_modules', 'ssh2'), 'ssh2'];
+  const candidates = [];
+  if (moduleDir) candidates.push(path.resolve(moduleDir, 'ssh2'));
+  candidates.push(path.resolve('tmp/ssh-tools/node_modules', 'ssh2'));
+  candidates.push('ssh2');
+  candidates.push('C:/Users/fengyu/AppData/Local/Temp/codex-ssh-client/node_modules/ssh2');
   for (const candidate of candidates) {
     try {
+      if (path.isAbsolute(candidate)) {
+        return createRequire(path.join(candidate, 'package.json'))('ssh2');
+      }
       return require(candidate);
     } catch (_) {
-      try {
-        return createRequire(path.join(candidate, 'package.json'))('ssh2');
-      } catch (_) {
-        // keep looking
-      }
+      // keep looking
     }
   }
   throw new Error('Cannot load ssh2. Pass --ssh2-module-dir <node_modules>');
