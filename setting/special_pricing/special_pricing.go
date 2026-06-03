@@ -19,24 +19,52 @@ type TableColumn struct {
 }
 
 type TableRow struct {
-	Ability     string  `json:"ability,omitempty"`
-	Resolution  string  `json:"resolution,omitempty"`
-	Version     string  `json:"version,omitempty"`
-	Mode        string  `json:"mode,omitempty"`
-	Duration    string  `json:"duration,omitempty"`
-	Multiplier  float64 `json:"multiplier"`
-	Unit        string  `json:"unit,omitempty"`
-	Description string  `json:"description,omitempty"`
+	Ability          string  `json:"ability,omitempty"`
+	Model            string  `json:"model,omitempty"`
+	InputImages      string  `json:"input_images,omitempty"`
+	Resolution       string  `json:"resolution,omitempty"`
+	Version          string  `json:"version,omitempty"`
+	Mode             string  `json:"mode,omitempty"`
+	Duration         string  `json:"duration,omitempty"`
+	Multiplier       float64 `json:"multiplier,omitempty"`
+	Price            float64 `json:"price,omitempty"`
+	PriceText        string  `json:"price_text,omitempty"`
+	FirstSecondPrice float64 `json:"first_second_price,omitempty"`
+	NextSecondPrice  float64 `json:"next_second_price,omitempty"`
+	Unit             string  `json:"unit,omitempty"`
+	Description      string  `json:"description,omitempty"`
+}
+
+type DisplaySection struct {
+	Title       string        `json:"title,omitempty"`
+	Description string        `json:"description,omitempty"`
+	Unit        string        `json:"unit,omitempty"`
+	Columns     []TableColumn `json:"columns,omitempty"`
+	Rows        []TableRow    `json:"rows,omitempty"`
 }
 
 type DisplayConfig struct {
-	Title        string        `json:"title,omitempty"`
-	Description  string        `json:"description,omitempty"`
-	Unit         string        `json:"unit,omitempty"`
-	CreditPrice  float64       `json:"credit_unit_price,omitempty"`
-	Columns      []TableColumn `json:"columns,omitempty"`
-	Rows         []TableRow    `json:"rows,omitempty"`
-	BillingReady bool          `json:"billing_enabled"`
+	Title             string           `json:"title,omitempty"`
+	Description       string           `json:"description,omitempty"`
+	Unit              string           `json:"unit,omitempty"`
+	CreditPrice       float64          `json:"credit_unit_price,omitempty"`
+	Columns           []TableColumn    `json:"columns,omitempty"`
+	Rows              []TableRow       `json:"rows,omitempty"`
+	Sections          []DisplaySection `json:"sections,omitempty"`
+	MinPrice          float64          `json:"min_price,omitempty"`
+	MinPriceUnit      string           `json:"min_price_unit,omitempty"`
+	MinPriceText      string           `json:"min_price_text,omitempty"`
+	BillingReady      bool             `json:"billing_enabled"`
+	DisplayOnlyReason string           `json:"display_only_reason,omitempty"`
+}
+
+type PricingEntry struct {
+	Key              string             `json:"key"`
+	Price            float64            `json:"price,omitempty"`
+	FirstSecondPrice float64            `json:"first_second_price,omitempty"`
+	NextSecondPrice  float64            `json:"next_second_price,omitempty"`
+	Unit             string             `json:"unit,omitempty"`
+	Addons           map[string]float64 `json:"addons,omitempty"`
 }
 
 type RuleConfig struct {
@@ -51,6 +79,7 @@ type RuleConfig struct {
 	DurationField   string         `json:"duration_field,omitempty"`
 	ValueField      string         `json:"value_field,omitempty"`
 	Multipliers     map[string]any `json:"multipliers,omitempty"`
+	Entries         []PricingEntry `json:"entries,omitempty"`
 	Display         DisplayConfig  `json:"display,omitempty"`
 }
 
@@ -129,6 +158,9 @@ func GetDisplay(modelName string) (DisplayConfig, bool) {
 	if display.CreditPrice <= 0 {
 		display.CreditPrice = rule.CreditUnitPrice
 	}
+	if display.MinPrice <= 0 {
+		display.MinPrice, display.MinPriceUnit = minDisplayPrice(display, rule)
+	}
 	display.BillingReady = rule.BillingEnabled
 	return display, true
 }
@@ -141,6 +173,47 @@ func ResolveTaskPricing(modelName string, req relaycommon.TaskSubmitReq) (MatchR
 	if !rule.BillingEnabled {
 		return MatchResult{}, true, fmt.Errorf("model %s has special pricing display but billing is not enabled", modelName)
 	}
+	key, spec := resolveRuleKey(rule, req)
+	if len(rule.Entries) > 0 {
+		entry, ok := lookupEntry(rule.Entries, key)
+		if !ok {
+			return MatchResult{}, true, fmt.Errorf("model %s does not support special pricing spec %s", modelName, key)
+		}
+		finalPrice := entry.Price
+		duration := 0
+		if entry.FirstSecondPrice > 0 || entry.NextSecondPrice > 0 {
+			duration = resolveDuration(req, rule.DefaultDuration)
+			if duration <= 0 {
+				return MatchResult{}, true, fmt.Errorf("model %s requires a positive duration", modelName)
+			}
+			if rule.MinDuration > 0 && duration < rule.MinDuration {
+				return MatchResult{}, true, fmt.Errorf("model %s duration %d is below minimum %d", modelName, duration, rule.MinDuration)
+			}
+			if rule.MaxDuration > 0 && duration > rule.MaxDuration {
+				return MatchResult{}, true, fmt.Errorf("model %s duration %d exceeds maximum %d", modelName, duration, rule.MaxDuration)
+			}
+			finalPrice = entry.FirstSecondPrice
+			if duration > 1 {
+				finalPrice += float64(duration-1) * entry.NextSecondPrice
+			}
+		}
+		for addonKey, addonPrice := range entry.Addons {
+			if metadataBool(req.Metadata, addonKey) {
+				finalPrice += addonPrice
+				spec[addonKey] = true
+			}
+		}
+		return MatchResult{
+			Rule:        rule,
+			Duration:    duration,
+			UnitPrice:   finalPrice,
+			FinalPrice:  finalPrice,
+			RuleKey:     key,
+			Spec:        spec,
+			DisplayInfo: rule.Display,
+		}, true, nil
+	}
+
 	duration := resolveDuration(req, rule.DefaultDuration)
 	if duration <= 0 {
 		return MatchResult{}, true, fmt.Errorf("model %s requires a positive duration", modelName)
@@ -151,7 +224,6 @@ func ResolveTaskPricing(modelName string, req relaycommon.TaskSubmitReq) (MatchR
 	if rule.MaxDuration > 0 && duration > rule.MaxDuration {
 		return MatchResult{}, true, fmt.Errorf("model %s duration %d exceeds maximum %d", modelName, duration, rule.MaxDuration)
 	}
-	key, spec := resolveRuleKey(rule, req)
 	multiplier, ok := lookupMultiplier(rule.Multipliers, key)
 	if !ok {
 		return MatchResult{}, true, fmt.Errorf("model %s does not support special pricing spec %s", modelName, key)
@@ -223,11 +295,65 @@ func resolveRuleKey(rule RuleConfig, req relaycommon.TaskSubmitReq) (string, map
 		spec["mode"] = mode
 		spec["with_audio"] = audio
 		return key, spec
+	case "vidu_q2":
+		endpoint := strings.ToLower(firstString(metadataString(req.Metadata, "endpoint"), metadataString(req.Metadata, "path")))
+		kind := strings.ToLower(firstString(metadataString(req.Metadata, "kind"), metadataString(req.Metadata, "category")))
+		ability := normalizeAbility(firstString(
+			metadataString(req.Metadata, "ability"),
+			metadataString(req.Metadata, "action"),
+			metadataString(req.Metadata, "type"),
+		))
+		resolution := normalizeResolution(firstString(
+			req.Size,
+			metadataString(req.Metadata, "resolution"),
+			metadataString(req.Metadata, "size"),
+			rule.DefaultValue,
+		))
+		imageCount := resolveImageCount(req)
+		isImage := strings.Contains(endpoint, "image") || strings.Contains(kind, "image") || strings.Contains(ability, "image")
+		if isImage {
+			if ability == "" || ability == "text" {
+				if imageCount > 0 {
+					ability = "reference"
+				} else {
+					ability = "text"
+				}
+			}
+			imageRange := imageCountRange(imageCount)
+			spec["category"] = "image"
+			spec["ability"] = ability
+			spec["input_images"] = imageRange
+			spec["resolution"] = resolution
+			return "image|" + ability + "|" + imageRange + "|" + resolution, spec
+		}
+		if ability == "" {
+			if req.HasImage() || strings.TrimSpace(req.Image) != "" || strings.TrimSpace(req.InputReference) != "" {
+				ability = "reference"
+			} else {
+				ability = "text"
+			}
+		}
+		spec["category"] = "video"
+		spec["ability"] = ability
+		spec["resolution"] = resolution
+		return "video|" + ability + "|" + resolution, spec
 	default:
 		value := firstString(req.Size, metadataString(req.Metadata, rule.ValueField), rule.DefaultValue)
 		spec["value"] = value
 		return value, spec
 	}
+}
+
+func lookupEntry(entries []PricingEntry, key string) (PricingEntry, bool) {
+	candidates := []string{key, strings.ToLower(key), strings.ToUpper(key)}
+	for _, entry := range entries {
+		for _, candidate := range candidates {
+			if entry.Key == candidate || strings.EqualFold(entry.Key, candidate) {
+				return entry, true
+			}
+		}
+	}
+	return PricingEntry{}, false
 }
 
 func lookupMultiplier(m map[string]any, key string) (float64, bool) {
@@ -279,6 +405,12 @@ func normalizeResolution(value string) string {
 	if strings.Contains(value, "1080") {
 		return "1080p"
 	}
+	if strings.Contains(value, "4k") || strings.Contains(value, "4096") {
+		return "4k"
+	}
+	if strings.Contains(value, "2k") || strings.Contains(value, "2048") {
+		return "2k"
+	}
 	if strings.Contains(value, "720") {
 		return "720p"
 	}
@@ -289,6 +421,82 @@ func normalizeResolution(value string) string {
 		return "480p"
 	}
 	return value
+}
+
+func normalizeAbility(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch {
+	case strings.Contains(value, "reference"), strings.Contains(value, "参考"), strings.Contains(value, "image"):
+		return "reference"
+	case strings.Contains(value, "text"), strings.Contains(value, "文生"):
+		return "text"
+	default:
+		return value
+	}
+}
+
+func resolveImageCount(req relaycommon.TaskSubmitReq) int {
+	if value, ok := metadataNumber(req.Metadata, "input_image_count"); ok {
+		return int(math.Round(value))
+	}
+	if value, ok := metadataNumber(req.Metadata, "image_count"); ok {
+		return int(math.Round(value))
+	}
+	count := len(req.Images)
+	if strings.TrimSpace(req.Image) != "" {
+		count++
+	}
+	if strings.TrimSpace(req.InputReference) != "" && count == 0 {
+		count = 1
+	}
+	return count
+}
+
+func imageCountRange(count int) string {
+	switch {
+	case count <= 0:
+		return "0"
+	case count <= 3:
+		return "1-3"
+	case count <= 7:
+		return "4-7"
+	default:
+		return "8+"
+	}
+}
+
+func minDisplayPrice(display DisplayConfig, rule RuleConfig) (float64, string) {
+	minPrice := math.Inf(1)
+	unit := display.Unit
+	visitRow := func(row TableRow, rowUnit string) {
+		price := row.Price
+		if price <= 0 && row.Multiplier > 0 {
+			unitPrice := display.CreditPrice
+			if unitPrice <= 0 {
+				unitPrice = rule.CreditUnitPrice
+			}
+			price = unitPrice * row.Multiplier
+		}
+		if price <= 0 && row.FirstSecondPrice > 0 {
+			price = row.FirstSecondPrice
+		}
+		if price > 0 && price < minPrice {
+			minPrice = price
+			unit = firstString(row.Unit, rowUnit, display.Unit, "次")
+		}
+	}
+	for _, row := range display.Rows {
+		visitRow(row, display.Unit)
+	}
+	for _, section := range display.Sections {
+		for _, row := range section.Rows {
+			visitRow(row, section.Unit)
+		}
+	}
+	if math.IsInf(minPrice, 1) {
+		return 0, unit
+	}
+	return minPrice, unit
 }
 
 func normalizeSize(value string) string {

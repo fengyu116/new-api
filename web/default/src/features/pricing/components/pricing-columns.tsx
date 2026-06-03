@@ -38,6 +38,7 @@ import { isTokenBasedModel } from '../lib/model-helpers'
 import {
   formatPrice,
   formatRequestPrice,
+  formatSpecialMinPrice,
   stripTrailingZeros,
 } from '../lib/price'
 import type { PricingModel, TokenUnit } from '../types'
@@ -151,6 +152,24 @@ export function usePricingColumns(
       ),
       cell: ({ row }) => {
         const model = row.original
+        const specialPrice = formatSpecialMinPrice(
+          model,
+          showRechargePrice,
+          priceRate,
+          usdExchangeRate
+        )
+        if (specialPrice) {
+          return (
+            <div className='min-w-[100px]'>
+              <span className='font-mono text-sm tabular-nums'>
+                {stripTrailingZeros(specialPrice)}
+              </span>
+              <div className='text-muted-foreground/50 text-[10px]'>
+                {t('Special Pricing')}
+              </div>
+            </div>
+          )
+        }
         const dynamicSummary = getDynamicPricingSummary(model, {
           tokenUnit,
           showRechargePrice,

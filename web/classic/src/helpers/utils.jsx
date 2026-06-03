@@ -645,6 +645,18 @@ export const calculateModelPrice = ({
     }
   }
 
+  if (record?.special_pricing?.min_price) {
+    const priceUSD = Number(record.special_pricing.min_price) * usedGroupRatio;
+    return {
+      price: `${displayPrice(priceUSD)} ${record.special_pricing.min_price_text ? '起' : ''}`.trim(),
+      isPerToken: false,
+      isTokensDisplay: false,
+      isSpecialPricing: true,
+      usedGroup,
+      usedGroupRatio,
+    };
+  }
+
   // 2. 动态计费（tiered_expr）
   if (record.billing_mode === 'tiered_expr' && record.billing_expr) {
     return {
@@ -784,6 +796,17 @@ export const getModelPriceItems = (
         value: '',
         suffix: '',
         isDynamic: true,
+      },
+    ];
+  }
+
+  if (priceData.isSpecialPricing) {
+    return [
+      {
+        key: 'special',
+        label: t('特殊价格'),
+        value: priceData.price,
+        suffix: '',
       },
     ];
   }

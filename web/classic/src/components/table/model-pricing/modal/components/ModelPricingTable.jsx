@@ -43,7 +43,9 @@ const ModelPricingTable = ({
   const renderSpecialPricingTable = () => {
     const special = modelData?.special_pricing;
     if (!special || !Array.isArray(special.rows) || special.rows.length === 0) {
-      return null;
+      if (!Array.isArray(special?.sections) || special.sections.length === 0) {
+        return null;
+      }
     }
     const availableGroups = Object.keys(usableGroup || {})
       .filter((g) => g !== '')
@@ -51,50 +53,28 @@ const ModelPricingTable = ({
       .filter((g) => modelEnableGroups.includes(g));
     const groups = availableGroups.length > 0 ? availableGroups : ['default'];
     const unitPrice = Number(special.credit_unit_price || 0);
-    const columns = [
-      {
-        title: t('分组'),
-        dataIndex: 'group',
-        render: (text) => (
-          <Tag color='white' size='small' shape='circle'>
-            {text}
-            {t('分组')}
-          </Tag>
-        ),
-      },
-      ...(special.columns || [])
-        .filter((col) => col.key !== 'price')
-        .map((col) => ({
-          title: t(col.title || col.key),
-          dataIndex: col.key,
-          render: (text) => text || '-',
-        })),
-      {
-        title: t('价格'),
-        dataIndex: 'price',
-        render: (_, row) => (
-          <div>
-            <div className='font-semibold text-orange-600'>
-              {row.multiplier > 0 ? displayPrice(row.price) : '-'}
-            </div>
-            <div className='text-xs text-gray-500'>
-              / {t(row.unit || special.unit || '次')}
-            </div>
-          </div>
-        ),
-      },
-    ];
-    const tableData = groups.flatMap((group) => {
-      const ratio = groupRatio && groupRatio[group] ? groupRatio[group] : 1;
-      return special.rows.map((row, index) => ({
-        key: `${group}-${index}`,
-        group,
-        ...row,
-        multiplier: Number(row.multiplier || 0),
-        price: unitPrice * Number(row.multiplier || 0) * ratio,
-        unit: row.unit || special.unit,
-      }));
-    });
+    const sections =
+      Array.isArray(special.sections) && special.sections.length > 0
+        ? special.sections
+        : [
+            {
+              title: special.title,
+              description: special.description,
+              unit: special.unit,
+              columns: special.columns,
+              rows: special.rows,
+            },
+          ];
+    const formatRowPrice = (row, ratio, sectionUnit) => {
+      if (Number(row.first_second_price || 0) > 0) {
+        return `${t('第1秒')}${displayPrice(Number(row.first_second_price || 0) * ratio)}，${t('后续每秒')}+${displayPrice(Number(row.next_second_price || 0) * ratio)}`;
+      }
+      const price =
+        Number(row.price || 0) > 0
+          ? Number(row.price || 0) * ratio
+          : unitPrice * Number(row.multiplier || 0) * ratio;
+      return price > 0 ? `${displayPrice(price)} / ${t(row.unit || sectionUnit || special.unit || '次')}` : '-';
+    };
 
     return (
       <div className='mb-5'>
@@ -107,19 +87,76 @@ const ModelPricingTable = ({
             {!special.billing_enabled ? ` · ${t('仅展示，未启用特殊扣费')}` : ''}
           </div>
         )}
-        <Table
-          dataSource={tableData}
-          columns={columns}
-          pagination={false}
-          size='small'
-          bordered={false}
-          className='!rounded-lg'
-        />
+        <div className='space-y-4'>
+          {groups.map((group) => {
+            const ratio = groupRatio && groupRatio[group] ? groupRatio[group] : 1;
+            return (
+              <div key={group} className='rounded-lg bg-gray-50 p-3'>
+                <div className='mb-3 flex items-center gap-2'>
+                  <Tag color='white' size='small' shape='circle'>
+                    {group}
+                    {t('分组')}
+                  </Tag>
+                  <Tag color='blue' size='small' shape='circle'>
+                    {ratio}x
+                  </Tag>
+                </div>
+                {sections.map((section, sectionIndex) => {
+                  const columns = [
+                    ...(section.columns || [])
+                      .filter((col) => col.key !== 'price')
+                      .map((col) => ({
+                        title: t(col.title || col.key),
+                        dataIndex: col.key,
+                        render: (text) => text || '-',
+                      })),
+                    {
+                      title: t('价格'),
+                      dataIndex: 'price',
+                      render: (_, row) => (
+                        <div className='font-semibold text-orange-600'>
+                          {formatRowPrice(row, ratio, section.unit)}
+                        </div>
+                      ),
+                    },
+                  ];
+                  const tableData = (section.rows || []).map((row, index) => ({
+                    key: `${group}-${sectionIndex}-${index}`,
+                    ...row,
+                  }));
+                  return (
+                    <div key={`${group}-${section.title || sectionIndex}`} className='mb-4 last:mb-0'>
+                      <div className='mb-2 text-sm font-semibold'>
+                        {section.title || special.title || t('特殊规格价格')}
+                      </div>
+                      {section.description && (
+                        <div className='text-xs text-gray-500 mb-2'>
+                          {section.description}
+                        </div>
+                      )}
+                      <Table
+                        dataSource={tableData}
+                        columns={columns}
+                        pagination={false}
+                        size='small'
+                        bordered={false}
+                        className='!rounded-lg'
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
       </div>
     );
   };
 
   const renderGroupPriceTable = () => {
+    if (modelData?.special_pricing) {
+      return null;
+    }
     // 仅展示模型可用的分组：模型 enable_groups 与用户可用分组的交集
 
     const availableGroups = Object.keys(usableGroup || {})

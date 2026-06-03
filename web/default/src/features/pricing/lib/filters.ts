@@ -102,6 +102,9 @@ export function filterByEndpointType(
  * Get model price for sorting
  */
 function getModelPrice(model: PricingModel): number {
+  if (model.special_pricing?.min_price) {
+    return model.special_pricing.min_price
+  }
   return model.quota_type === 0 ? model.model_ratio : model.model_price || 0
 }
 

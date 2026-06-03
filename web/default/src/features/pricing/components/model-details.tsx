@@ -606,11 +606,24 @@ function SpecialPricingSection(props: {
     () => getAvailableGroups(props.model, props.usableGroup || {}),
     [props.model, props.usableGroup]
   )
-  if (!special?.rows?.length) return null
+  const sections =
+    special?.sections && special.sections.length > 0
+      ? special.sections
+      : special?.rows?.length
+        ? [
+            {
+              title: special.title,
+              description: special.description,
+              unit: special.unit,
+              columns: special.columns,
+              rows: special.rows,
+            },
+          ]
+        : []
+  if (!special || sections.length === 0) return null
 
   const groups = availableGroups.length > 0 ? availableGroups : ['default']
   const unitPrice = Number(special.credit_unit_price || 0)
-  const columns = (special.columns || []).filter((column) => column.key !== 'price')
   const valueFor = (row: SpecialPricingRow, key: string) => {
     const value = row[key as keyof SpecialPricingRow]
     if (value == null || value === '') return '-'
@@ -623,9 +636,26 @@ function SpecialPricingSection(props: {
         : price,
       { digitsLarge: 4, digitsSmall: 6, abbreviate: false }
     )
+  const formatRowPrice = (
+    row: SpecialPricingRow,
+    ratio: number,
+    sectionUnit?: string
+  ) => {
+    if (Number(row.first_second_price || 0) > 0) {
+      const first = formatPrice(Number(row.first_second_price || 0) * ratio)
+      const next = formatPrice(Number(row.next_second_price || 0) * ratio)
+      return `${t('First second')} ${first}, ${t('then')} +${next}/${t('second')}`
+    }
+    const fixedPrice =
+      Number(row.price || 0) > 0
+        ? Number(row.price || 0) * ratio
+        : unitPrice * Number(row.multiplier || 0) * ratio
+    if (fixedPrice <= 0) return '-'
+    return `${formatPrice(fixedPrice)} / ${t(row.unit || sectionUnit || special.unit || 'request')}`
+  }
 
   return (
-    <div className='mb-4 rounded-lg border p-3'>
+    <div className='space-y-4'>
       <div className='mb-2'>
         <div className='text-sm font-medium'>
           {special.title || t('Special Pricing')}
@@ -636,60 +666,77 @@ function SpecialPricingSection(props: {
             {!special.billing_enabled
               ? ` · ${t('Display only, special billing is not enabled')}`
               : ''}
+            {special.display_only_reason
+              ? ` · ${special.display_only_reason}`
+              : ''}
           </p>
         )}
       </div>
-      <div className='overflow-x-auto'>
-        <Table className='text-sm'>
-          <TableHeader>
-            <TableRow className='hover:bg-transparent'>
-              <TableHead className='text-muted-foreground py-2 text-[10px] font-medium tracking-wider uppercase'>
-                {t('Group')}
-              </TableHead>
-              {columns.map((column) => (
-                <TableHead
-                  key={column.key}
-                  className='text-muted-foreground py-2 text-[10px] font-medium tracking-wider uppercase'
-                >
-                  {t(column.title || column.key)}
-                </TableHead>
-              ))}
-              <TableHead className='text-muted-foreground py-2 text-right text-[10px] font-medium tracking-wider uppercase'>
-                {t('Price')}
-              </TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {groups.flatMap((group) => {
-              const ratio = props.groupRatio[group] || 1
-              return special.rows!.map((row, index) => {
-                const price = unitPrice * Number(row.multiplier || 0) * ratio
-                const hasPrice = Number(row.multiplier || 0) > 0
-                return (
-                  <TableRow key={`${group}-${index}`}>
-                    <TableCell>
-                      <GroupBadge group={group} size='sm' />
-                    </TableCell>
-                    {columns.map((column) => (
-                      <TableCell key={column.key}>
-                        {valueFor(row, column.key)}
-                      </TableCell>
-                    ))}
-                    <TableCell className='text-right'>
-                      <span className='font-mono font-semibold tabular-nums'>
-                        {hasPrice ? formatPrice(price) : '-'}
-                      </span>
-                      <span className='text-muted-foreground/50 ml-1 text-xs'>
-                        / {t(row.unit || special.unit || 'request')}
-                      </span>
-                    </TableCell>
-                  </TableRow>
+      {groups.map((group) => {
+        const ratio = props.groupRatio[group] || 1
+        return (
+          <div key={group} className='rounded-lg border bg-muted/20 p-3'>
+            <div className='mb-3 flex items-center gap-2'>
+              <GroupBadge group={group} size='sm' />
+              <span className='text-muted-foreground font-mono text-xs'>
+                {ratio}x
+              </span>
+            </div>
+            <div className='space-y-4'>
+              {sections.map((section, sectionIndex) => {
+                const columns = (section.columns || []).filter(
+                  (column) => column.key !== 'price'
                 )
-              })
-            })}
-          </TableBody>
-        </Table>
-      </div>
+                return (
+                  <div key={`${group}-${section.title || sectionIndex}`}>
+                    <div className='mb-2 text-sm font-semibold'>
+                      {section.title || special.title || t('Special Pricing')}
+                    </div>
+                    {section.description && (
+                      <p className='text-muted-foreground mb-2 text-xs'>
+                        {section.description}
+                      </p>
+                    )}
+                    <div className='overflow-x-auto'>
+                      <Table className='text-sm'>
+                        <TableHeader>
+                          <TableRow className='hover:bg-transparent'>
+                            {columns.map((column) => (
+                              <TableHead
+                                key={column.key}
+                                className='text-muted-foreground py-2 text-[10px] font-medium tracking-wider uppercase'
+                              >
+                                {t(column.title || column.key)}
+                              </TableHead>
+                            ))}
+                            <TableHead className='text-muted-foreground py-2 text-right text-[10px] font-medium tracking-wider uppercase'>
+                              {t('Price')}
+                            </TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {(section.rows || []).map((row, index) => (
+                            <TableRow key={`${group}-${sectionIndex}-${index}`}>
+                              {columns.map((column) => (
+                                <TableCell key={column.key}>
+                                  {valueFor(row, column.key)}
+                                </TableCell>
+                              ))}
+                              <TableCell className='text-right font-mono font-semibold tabular-nums'>
+                                {formatRowPrice(row, ratio, section.unit)}
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -736,6 +783,23 @@ function GroupPricingSection(props: {
       types.push({ label: t('Audio Out'), type: 'audio_output' })
     return types
   }, [props.model, t])
+
+  if (props.model.special_pricing) {
+    return (
+      <section>
+        <SectionTitle>{t('Pricing by Group')}</SectionTitle>
+        <AutoGroupChain model={props.model} autoGroups={props.autoGroups} />
+        <SpecialPricingSection
+          model={props.model}
+          groupRatio={props.groupRatio}
+          usableGroup={props.usableGroup}
+          priceRate={props.priceRate}
+          usdExchangeRate={props.usdExchangeRate}
+          showRechargePrice={showRechargePrice}
+        />
+      </section>
+    )
+  }
 
   if (availableGroups.length === 0) {
     return (
@@ -880,14 +944,6 @@ function GroupPricingSection(props: {
     <section>
       <SectionTitle>{t('Pricing by Group')}</SectionTitle>
       <AutoGroupChain model={props.model} autoGroups={props.autoGroups} />
-      <SpecialPricingSection
-        model={props.model}
-        groupRatio={props.groupRatio}
-        usableGroup={props.usableGroup}
-        priceRate={props.priceRate}
-        usdExchangeRate={props.usdExchangeRate}
-        showRechargePrice={showRechargePrice}
-      />
       <div className='-mx-4 overflow-x-auto sm:mx-0'>
         <Table className='text-sm'>
           <TableHeader>
@@ -1059,13 +1115,15 @@ export function ModelDetailsContent(props: ModelDetailsContentProps) {
 
           <section className='bg-card/60 space-y-5 rounded-xl border p-4 shadow-sm'>
             <SectionTitle>{t('Pricing')}</SectionTitle>
-            <PriceSection
-              model={props.model}
-              priceRate={props.priceRate}
-              usdExchangeRate={props.usdExchangeRate}
-              tokenUnit={props.tokenUnit}
-              showRechargePrice={showRechargePrice}
-            />
+            {!props.model.special_pricing && (
+              <PriceSection
+                model={props.model}
+                priceRate={props.priceRate}
+                usdExchangeRate={props.usdExchangeRate}
+                tokenUnit={props.tokenUnit}
+                showRechargePrice={showRechargePrice}
+              />
+            )}
             {isDynamic && (
               <DynamicPricingBreakdown billingExpr={props.model.billing_expr} />
             )}

@@ -80,13 +80,28 @@ export type SpecialPricingColumn = {
 
 export type SpecialPricingRow = {
   ability?: string
+  model?: string
+  input_images?: string
   resolution?: string
   version?: string
   mode?: string
   duration?: string
   description?: string
-  multiplier: number
+  multiplier?: number
+  price?: number
+  price_text?: string
+  first_second_price?: number
+  next_second_price?: number
   unit?: string
+  [key: string]: string | number | undefined
+}
+
+export type SpecialPricingSection = {
+  title?: string
+  description?: string
+  unit?: string
+  columns?: SpecialPricingColumn[]
+  rows?: SpecialPricingRow[]
 }
 
 export type SpecialPricingDisplay = {
@@ -95,8 +110,13 @@ export type SpecialPricingDisplay = {
   unit?: string
   credit_unit_price?: number
   billing_enabled: boolean
+  display_only_reason?: string
+  min_price?: number
+  min_price_unit?: string
+  min_price_text?: string
   columns?: SpecialPricingColumn[]
   rows?: SpecialPricingRow[]
+  sections?: SpecialPricingSection[]
 }
 
 /** Input/output modalities supported by a model. */

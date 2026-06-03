@@ -270,6 +270,14 @@ export function formatRequestPrice(
   priceRate = 1,
   usdExchangeRate = 1
 ): string {
+  const specialPrice = formatSpecialMinPrice(
+    model,
+    showWithRecharge,
+    priceRate,
+    usdExchangeRate
+  )
+  if (specialPrice) return specialPrice
+
   if (model.quota_type !== QUOTA_TYPE_VALUES.REQUEST) {
     return '-'
   }
@@ -294,4 +302,27 @@ export function formatRequestPrice(
     digitsSmall: 4,
     abbreviate: false,
   })
+}
+
+export function formatSpecialMinPrice(
+  model: PricingModel,
+  showWithRecharge = false,
+  priceRate = 1,
+  usdExchangeRate = 1
+): string | null {
+  const minPrice = Number(model.special_pricing?.min_price || 0)
+  if (!model.special_pricing || !Number.isFinite(minPrice) || minPrice <= 0) {
+    return null
+  }
+  const priceInUSD = applyRechargeRate(
+    minPrice,
+    showWithRecharge,
+    priceRate,
+    usdExchangeRate
+  )
+  return `${formatCurrencyFromUSD(priceInUSD, {
+    digitsLarge: 4,
+    digitsSmall: 4,
+    abbreviate: false,
+  })} 起`
 }

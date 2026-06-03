@@ -341,6 +341,10 @@ func updatePricing() {
 		}
 		if display, ok := special_pricing.GetDisplay(model); ok {
 			pricing.SpecialPricing = &display
+			if display.MinPrice > 0 {
+				pricing.ModelPrice = display.MinPrice
+				pricing.QuotaType = 1
+			}
 		}
 		pricingMap = append(pricingMap, pricing)
 	}

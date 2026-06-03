@@ -346,12 +346,204 @@ def expand_models(
 
 
 def looks_special(name: str) -> bool:
-    prefixes = ("kling-", "pixverse-", "vidu", "sora-2", "happyhorse", "wan2.", "doubao-seedance")
+    prefixes = (
+        "kling-",
+        "pixverse-",
+        "vidu",
+        "sora-2",
+        "happyhorse",
+        "wan2.",
+        "doubao-seedance",
+        "MiniMax-Hailuo",
+        "audio",
+    )
     return name.startswith(prefixes)
+
+
+def price_text(value: Decimal | float | int) -> str:
+    return f"💰{Decimal(str(value)).quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP):f}"
+
+
+def min_price_from_sections(sections: list[dict[str, Any]]) -> Decimal:
+    prices: list[Decimal] = []
+    for section in sections:
+        for row in section.get("rows") or []:
+            if row.get("price") is not None:
+                prices.append(dec(row.get("price")))
+            elif row.get("first_second_price") is not None:
+                prices.append(dec(row.get("first_second_price")))
+            elif row.get("multiplier") is not None:
+                unit = dec(section.get("credit_unit_price"), "0.05")
+                prices.append(unit * dec(row.get("multiplier")))
+    return min(prices) if prices else Decimal("0")
+
+
+def display_config(
+    title: str,
+    description: str,
+    unit: str,
+    credit_unit_price: Decimal,
+    billing_enabled: bool,
+    sections: list[dict[str, Any]],
+    display_only_reason: str = "",
+) -> dict[str, Any]:
+    min_price = min_price_from_sections(sections)
+    first = sections[0] if sections else {}
+    return {
+        "title": title,
+        "description": description,
+        "unit": unit,
+        "credit_unit_price": float(credit_unit_price),
+        "billing_enabled": billing_enabled,
+        "display_only_reason": display_only_reason,
+        "columns": first.get("columns") or [],
+        "rows": first.get("rows") or [],
+        "sections": sections,
+        "min_price": float(min_price),
+        "min_price_unit": unit,
+        "min_price_text": f"{price_text(min_price)} 起" if min_price > 0 else "",
+    }
+
+
+def direct_display_only_rule(row: dict[str, Any], credit_unit_price: Decimal, reason: str) -> dict[str, Any]:
+    price = dec(row.get("model_price"), "0")
+    if price <= 0:
+        price = credit_unit_price * dec(row.get("model_ratio"), "1")
+    unit = "次" if int(row.get("quota_type") or 1) == 1 else "单位"
+    sections = [
+        {
+            "title": "特殊价格",
+            "description": reason,
+            "unit": unit,
+            "columns": [
+                {"key": "description", "title": "说明"},
+                {"key": "price", "title": "价格"},
+            ],
+            "rows": [
+                {
+                    "description": "cank 中存在特殊展示/计费分支；当前仅展示兼容价格，未启用动态特殊扣费",
+                    "price": float(price),
+                    "price_text": price_text(price),
+                    "unit": unit,
+                }
+            ],
+        }
+    ]
+    return {
+        "type": "display_only",
+        "credit_unit_price": float(credit_unit_price),
+        "billing_enabled": False,
+        "display_only_reason": reason,
+        "display": display_config("特殊价格", reason, unit, credit_unit_price, False, sections, reason),
+    }
+
+
+def viduq2_rule(credit_unit_price: Decimal) -> dict[str, Any]:
+    video_rows = [
+        ("text", "文生", "Q2", "540p", Decimal("0.5000"), Decimal("0.1000")),
+        ("text", "文生", "Q2", "720p", Decimal("0.7500"), Decimal("0.2500")),
+        ("text", "文生", "Q2", "1080p", Decimal("1.0000"), Decimal("0.5000")),
+        ("reference", "参考生", "Q2", "540p", Decimal("0.7500"), Decimal("0.2500")),
+        ("reference", "参考生", "Q2", "720p", Decimal("1.2500"), Decimal("0.2500")),
+        ("reference", "参考生", "Q2", "1080p", Decimal("3.7500"), Decimal("0.5000")),
+    ]
+    image_rows = [
+        ("text", "文生图", "0", "1080p", Decimal("0.3000")),
+        ("text", "文生图", "0", "2k", Decimal("0.4000")),
+        ("text", "文生图", "0", "4k", Decimal("0.5000")),
+        ("reference", "参考生图", "1-3", "1080p", Decimal("0.4000")),
+        ("reference", "参考生图", "1-3", "2k", Decimal("0.6000")),
+        ("reference", "参考生图", "1-3", "4k", Decimal("1.0000")),
+        ("reference", "参考生图", "4-7", "1080p", Decimal("0.5000")),
+        ("reference", "参考生图", "4-7", "2k", Decimal("0.8000")),
+        ("reference", "参考生图", "4-7", "4k", Decimal("1.5000")),
+    ]
+    entries = [
+        {
+            "key": f"video|{ability}|{resolution}",
+            "first_second_price": float(first),
+            "next_second_price": float(next_second),
+            "unit": "次",
+            "addons": {
+                "with_audio": 0.75,
+                "audio": 0.75,
+                "recommend_prompt": 0.5,
+                "prompt_optimizer": 0.5,
+                "enhance_prompt": 0.5,
+            },
+        }
+        for ability, _, _, resolution, first, next_second in video_rows
+    ]
+    entries.extend(
+        {
+            "key": f"image|{ability}|{image_count}|{resolution}",
+            "price": float(price),
+            "unit": "次",
+        }
+        for ability, _, image_count, resolution, price in image_rows
+    )
+    sections = [
+        {
+            "title": "视频生成",
+            "description": "图生/参考生音视频直出额外 💰0.7500；启用推荐提示词额外 💰0.5000",
+            "unit": "次",
+            "columns": [
+                {"key": "ability", "title": "能力"},
+                {"key": "model", "title": "模型"},
+                {"key": "resolution", "title": "分辨率"},
+                {"key": "price", "title": "定价"},
+            ],
+            "rows": [
+                {
+                    "ability": label,
+                    "model": model,
+                    "resolution": resolution.upper(),
+                    "first_second_price": float(first),
+                    "next_second_price": float(next_second),
+                    "price_text": f"第1秒{price_text(first)}，后续每秒+{price_text(next_second)}",
+                    "unit": "次",
+                }
+                for _, label, model, resolution, first, next_second in video_rows
+            ],
+        },
+        {
+            "title": "图像生成",
+            "unit": "次",
+            "columns": [
+                {"key": "ability", "title": "能力"},
+                {"key": "input_images", "title": "输入图片数量"},
+                {"key": "resolution", "title": "分辨率"},
+                {"key": "price", "title": "价格"},
+            ],
+            "rows": [
+                {
+                    "ability": label,
+                    "input_images": image_count,
+                    "resolution": resolution.upper(),
+                    "price": float(price),
+                    "price_text": price_text(price),
+                    "unit": "次",
+                }
+                for _, label, image_count, resolution, price in image_rows
+            ],
+        },
+    ]
+    return {
+        "type": "vidu_q2",
+        "credit_unit_price": float(credit_unit_price),
+        "billing_enabled": True,
+        "default_duration": 5,
+        "min_duration": 1,
+        "max_duration": 16,
+        "default_value": "1080p",
+        "entries": entries,
+        "display": display_config("分组价格", "按 Vidu Q2 视频/图像规格计费", "次", credit_unit_price, True, sections),
+    }
 
 
 def build_special_pricing(rows: list[dict[str, Any]], credit_unit_price: Decimal) -> dict[str, Any]:
     source_names = {row.get("model_name") for row in rows}
+    row_by_name = {row.get("model_name"): row for row in rows}
     unit = float(credit_unit_price)
     special: dict[str, Any] = {"version": "1", "models": {}}
 
@@ -395,6 +587,9 @@ def build_special_pricing(rows: list[dict[str, Any]], credit_unit_price: Decimal
                 ],
             },
         }
+
+    if "viduq2" in source_names:
+        special["models"]["viduq2"] = viduq2_rule(credit_unit_price)
 
     if "sora-2" in source_names:
         special["models"]["sora-2"] = {
@@ -497,32 +692,38 @@ def build_special_pricing(rows: list[dict[str, Any]], credit_unit_price: Decimal
         }
 
     if "pixverse-video" in source_names:
-        special["models"]["pixverse-video"] = {
-            "type": "pixverse_video",
-            "credit_unit_price": unit,
-            "billing_enabled": False,
-            "default_duration": 5,
-            "min_duration": 1,
-            "max_duration": 16,
-            "multipliers": {},
-            "display": {
-                "title": "PixVerse 特殊价格",
-                "description": "当前项目没有完整 PixVerse 任务适配器，暂只展示，不启用真实特殊扣费",
-                "unit": "秒",
-                "credit_unit_price": unit,
-                "billing_enabled": False,
-                "columns": [
-                    {"key": "description", "title": "说明"},
-                ],
-                "rows": [
-                    {
-                        "description": "需要补齐 PixVerse task adaptor 后才能启用真实动态扣费",
-                        "multiplier": 0,
-                        "unit": "秒",
-                    }
-                ],
-            },
-        }
+        special["models"]["pixverse-video"] = direct_display_only_rule(
+            row_by_name["pixverse-video"],
+            credit_unit_price,
+            "当前项目没有完整 PixVerse 任务适配器，暂只展示，不启用真实特殊扣费",
+        )
+
+    for model_name, rule in list(special["models"].items()):
+        display = rule.get("display") or {}
+        if not display.get("sections"):
+            section = {
+                "title": display.get("title") or "分组价格",
+                "description": display.get("description") or "",
+                "unit": display.get("unit") or "次",
+                "columns": display.get("columns") or [],
+                "rows": display.get("rows") or [],
+                "credit_unit_price": display.get("credit_unit_price") or rule.get("credit_unit_price") or unit,
+            }
+            display["sections"] = [section]
+        min_price = min_price_from_sections(display["sections"])
+        display["min_price"] = float(min_price)
+        display["min_price_unit"] = display.get("unit") or "次"
+        display["min_price_text"] = f"{price_text(min_price)} 起" if min_price > 0 else ""
+        display["billing_enabled"] = bool(rule.get("billing_enabled"))
+        rule["display"] = display
+        special["models"][model_name] = rule
+
+    display_only_reason = "cank 中存在特殊展示/计费分支，但当前项目无法安全从请求中推导完整规格，先仅展示不启用特殊扣费"
+    for row in rows:
+        model_name = row.get("model_name")
+        if not model_name or model_name in special["models"] or not looks_special(str(model_name)):
+            continue
+        special["models"][model_name] = direct_display_only_rule(row, credit_unit_price, display_only_reason)
 
     return special
 
@@ -777,6 +978,8 @@ def main() -> int:
     endpoint_catalog = fzbl.get("supported_endpoint") or {}
     models, cleanup_virtuals, skipped = expand_models(rows, endpoint_catalog, credit_unit_price, args.split_special)
     option_maps = build_option_maps(models, fzbl, credit_unit_price)
+    special_models = (option_maps.get("SpecialModelPricing") or {}).get("models", {})
+    skipped = [item for item in skipped if item.get("model_name") not in special_models]
     key_for_sql = args.key or "__DRY_RUN_KEY__"
     channels = build_channels(models, key_for_sql, args.base_url)
     sql = build_sql(fzbl.get("vendors") or [], models, cleanup_virtuals, channels, option_maps)
@@ -789,7 +992,17 @@ def main() -> int:
         "cleanup_virtual_models": len(cleanup_virtuals),
         "base_models": len(models) - virtual_count,
         "channels": len(channels),
-        "special_pricing_models": sorted((option_maps.get("SpecialModelPricing") or {}).get("models", {}).keys()),
+        "special_pricing_models": sorted(special_models.keys()),
+        "billing_enabled_special_models": sorted(
+            name for name, rule in special_models.items() if rule.get("billing_enabled")
+        ),
+        "display_only_special_models": sorted(
+            name for name, rule in special_models.items() if not rule.get("billing_enabled")
+        ),
+        "special_min_prices": {
+            name: (rule.get("display") or {}).get("min_price")
+            for name, rule in sorted(special_models.items())
+        },
         "groups": sorted({group for model in models for group in model.groups}),
         "option_counts": {key: len(value) for key, value in option_maps.items()},
         "credit_unit_price": float(credit_unit_price),
