@@ -215,3 +215,104 @@ func TestResolveViduQ2RejectsUnsupportedSpec(t *testing.T) {
 		t.Fatal("ResolveTaskPricing error = nil, want unsupported spec error")
 	}
 }
+
+func TestResolveEntryFieldsFixedSpec(t *testing.T) {
+	err := UpdateByJSONString(`{
+		"models":{
+			"kling-image":{
+				"type":"entry_fields",
+				"credit_unit_price":0.05,
+				"billing_enabled":true,
+				"key_fields":["version","generation_type","resolution"],
+				"default_value":"kling-v2",
+				"entries":[
+					{"key":"kling-v2|multi_image|1k","price":0.8},
+					{"key":"kling-v2|text|1k","price":0.2}
+				]
+			}
+		}
+	}`)
+	if err != nil {
+		t.Fatalf("UpdateByJSONString error = %v", err)
+	}
+
+	got, matched, err := ResolveTaskPricing("kling-image", relaycommon.TaskSubmitReq{
+		Size:   "1K",
+		Images: []string{"1", "2"},
+		Metadata: map[string]interface{}{
+			"model_name": "kling-v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ResolveTaskPricing error = %v", err)
+	}
+	if !matched {
+		t.Fatal("ResolveTaskPricing matched = false")
+	}
+	if math.Abs(got.FinalPrice-0.8) > 0.000001 {
+		t.Fatalf("FinalPrice = %v, want 0.8", got.FinalPrice)
+	}
+}
+
+func TestResolveEntryFieldsSecondSecondPrice(t *testing.T) {
+	err := UpdateByJSONString(`{
+		"models":{
+			"viduq2-pro":{
+				"type":"entry_fields",
+				"credit_unit_price":0.05,
+				"billing_enabled":true,
+				"key_fields":["ability","resolution"],
+				"default_duration":5,
+				"entries":[
+					{"key":"reference|540p","first_second_price":0.4,"second_second_price":0.5,"next_second_price":0.25}
+				]
+			}
+		}
+	}`)
+	if err != nil {
+		t.Fatalf("UpdateByJSONString error = %v", err)
+	}
+
+	got, matched, err := ResolveTaskPricing("viduq2-pro", relaycommon.TaskSubmitReq{
+		Duration: 4,
+		Size:     "540P",
+		Metadata: map[string]interface{}{"ability": "reference"},
+	})
+	if err != nil {
+		t.Fatalf("ResolveTaskPricing error = %v", err)
+	}
+	if !matched {
+		t.Fatal("ResolveTaskPricing matched = false")
+	}
+	want := 0.4 + 0.5 + 2*0.25
+	if math.Abs(got.FinalPrice-want) > 0.000001 {
+		t.Fatalf("FinalPrice = %v, want %v", got.FinalPrice, want)
+	}
+}
+
+func TestResolveEntryFieldsRejectsMissingSpec(t *testing.T) {
+	err := UpdateByJSONString(`{
+		"models":{
+			"gemini-3-pro-image-preview":{
+				"type":"entry_fields",
+				"credit_unit_price":0.05,
+				"billing_enabled":true,
+				"key_fields":["resolution"],
+				"entries":[{"key":"1k","price":0.05}]
+			}
+		}
+	}`)
+	if err != nil {
+		t.Fatalf("UpdateByJSONString error = %v", err)
+	}
+
+	_, matched, err := ResolveTaskPricing("gemini-3-pro-image-preview", relaycommon.TaskSubmitReq{
+		Size: "4K",
+	})
+	if !matched {
+		t.Fatal("ResolveTaskPricing matched = false")
+	}
+	if err == nil {
+		t.Fatal("ResolveTaskPricing error = nil, want unsupported spec error")
+	}
+}

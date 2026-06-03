@@ -19,20 +19,21 @@ type TableColumn struct {
 }
 
 type TableRow struct {
-	Ability          string  `json:"ability,omitempty"`
-	Model            string  `json:"model,omitempty"`
-	InputImages      string  `json:"input_images,omitempty"`
-	Resolution       string  `json:"resolution,omitempty"`
-	Version          string  `json:"version,omitempty"`
-	Mode             string  `json:"mode,omitempty"`
-	Duration         string  `json:"duration,omitempty"`
-	Multiplier       float64 `json:"multiplier,omitempty"`
-	Price            float64 `json:"price,omitempty"`
-	PriceText        string  `json:"price_text,omitempty"`
-	FirstSecondPrice float64 `json:"first_second_price,omitempty"`
-	NextSecondPrice  float64 `json:"next_second_price,omitempty"`
-	Unit             string  `json:"unit,omitempty"`
-	Description      string  `json:"description,omitempty"`
+	Ability           string  `json:"ability,omitempty"`
+	Model             string  `json:"model,omitempty"`
+	InputImages       string  `json:"input_images,omitempty"`
+	Resolution        string  `json:"resolution,omitempty"`
+	Version           string  `json:"version,omitempty"`
+	Mode              string  `json:"mode,omitempty"`
+	Duration          string  `json:"duration,omitempty"`
+	Multiplier        float64 `json:"multiplier,omitempty"`
+	Price             float64 `json:"price,omitempty"`
+	PriceText         string  `json:"price_text,omitempty"`
+	FirstSecondPrice  float64 `json:"first_second_price,omitempty"`
+	SecondSecondPrice float64 `json:"second_second_price,omitempty"`
+	NextSecondPrice   float64 `json:"next_second_price,omitempty"`
+	Unit              string  `json:"unit,omitempty"`
+	Description       string  `json:"description,omitempty"`
 }
 
 type DisplaySection struct {
@@ -59,12 +60,13 @@ type DisplayConfig struct {
 }
 
 type PricingEntry struct {
-	Key              string             `json:"key"`
-	Price            float64            `json:"price,omitempty"`
-	FirstSecondPrice float64            `json:"first_second_price,omitempty"`
-	NextSecondPrice  float64            `json:"next_second_price,omitempty"`
-	Unit             string             `json:"unit,omitempty"`
-	Addons           map[string]float64 `json:"addons,omitempty"`
+	Key               string             `json:"key"`
+	Price             float64            `json:"price,omitempty"`
+	FirstSecondPrice  float64            `json:"first_second_price,omitempty"`
+	SecondSecondPrice float64            `json:"second_second_price,omitempty"`
+	NextSecondPrice   float64            `json:"next_second_price,omitempty"`
+	Unit              string             `json:"unit,omitempty"`
+	Addons            map[string]float64 `json:"addons,omitempty"`
 }
 
 type RuleConfig struct {
@@ -72,6 +74,7 @@ type RuleConfig struct {
 	Type            string         `json:"type"`
 	CreditUnitPrice float64        `json:"credit_unit_price"`
 	BillingEnabled  bool           `json:"billing_enabled"`
+	KeyFields       []string       `json:"key_fields,omitempty"`
 	DefaultDuration int            `json:"default_duration,omitempty"`
 	MinDuration     int            `json:"min_duration,omitempty"`
 	MaxDuration     int            `json:"max_duration,omitempty"`
@@ -181,7 +184,7 @@ func ResolveTaskPricing(modelName string, req relaycommon.TaskSubmitReq) (MatchR
 		}
 		finalPrice := entry.Price
 		duration := 0
-		if entry.FirstSecondPrice > 0 || entry.NextSecondPrice > 0 {
+		if entry.FirstSecondPrice > 0 || entry.SecondSecondPrice > 0 || entry.NextSecondPrice > 0 {
 			duration = resolveDuration(req, rule.DefaultDuration)
 			if duration <= 0 {
 				return MatchResult{}, true, fmt.Errorf("model %s requires a positive duration", modelName)
@@ -193,7 +196,12 @@ func ResolveTaskPricing(modelName string, req relaycommon.TaskSubmitReq) (MatchR
 				return MatchResult{}, true, fmt.Errorf("model %s duration %d exceeds maximum %d", modelName, duration, rule.MaxDuration)
 			}
 			finalPrice = entry.FirstSecondPrice
-			if duration > 1 {
+			if duration > 1 && entry.SecondSecondPrice > 0 {
+				finalPrice += entry.SecondSecondPrice
+				if duration > 2 {
+					finalPrice += float64(duration-2) * entry.NextSecondPrice
+				}
+			} else if duration > 1 {
 				finalPrice += float64(duration-1) * entry.NextSecondPrice
 			}
 		}
@@ -337,11 +345,142 @@ func resolveRuleKey(rule RuleConfig, req relaycommon.TaskSubmitReq) (string, map
 		spec["ability"] = ability
 		spec["resolution"] = resolution
 		return "video|" + ability + "|" + resolution, spec
+	case "entry_fields":
+		return resolveEntryFieldsKey(rule, req)
 	default:
 		value := firstString(req.Size, metadataString(req.Metadata, rule.ValueField), rule.DefaultValue)
 		spec["value"] = value
 		return value, spec
 	}
+}
+
+func resolveEntryFieldsKey(rule RuleConfig, req relaycommon.TaskSubmitReq) (string, map[string]any) {
+	spec := map[string]any{}
+	fields := rule.KeyFields
+	if len(fields) == 0 {
+		fields = []string{"value"}
+	}
+	parts := make([]string, 0, len(fields))
+	for _, field := range fields {
+		value := resolveFieldValue(field, rule, req)
+		spec[field] = value
+		parts = append(parts, value)
+	}
+	return strings.Join(parts, "|"), spec
+}
+
+func resolveFieldValue(field string, rule RuleConfig, req relaycommon.TaskSubmitReq) string {
+	field = strings.ToLower(strings.TrimSpace(field))
+	switch field {
+	case "resolution", "quality", "size":
+		return normalizeResolution(firstString(
+			req.Size,
+			metadataString(req.Metadata, field),
+			metadataString(req.Metadata, "resolution"),
+			metadataString(req.Metadata, "quality"),
+			metadataString(req.Metadata, "size"),
+			rule.DefaultValue,
+		))
+	case "duration", "seconds":
+		duration := resolveDuration(req, rule.DefaultDuration)
+		if duration <= 0 {
+			return ""
+		}
+		return strconv.Itoa(duration)
+	case "duration_range":
+		duration := resolveDuration(req, rule.DefaultDuration)
+		switch {
+		case duration <= 0:
+			return ""
+		case duration <= 5:
+			return "5"
+		case duration <= 10:
+			return "10"
+		default:
+			return strconv.Itoa(duration)
+		}
+	case "ability":
+		ability := normalizeAbility(firstString(
+			metadataString(req.Metadata, "ability"),
+			metadataString(req.Metadata, "action"),
+			metadataString(req.Metadata, "type"),
+			metadataString(req.Metadata, "category"),
+		))
+		if ability == "" {
+			if req.HasImage() || strings.TrimSpace(req.Image) != "" || strings.TrimSpace(req.InputReference) != "" {
+				return "reference"
+			}
+			return "text"
+		}
+		return ability
+	case "generation_type", "kind", "category":
+		return normalizeGenerationType(firstString(
+			metadataString(req.Metadata, field),
+			metadataString(req.Metadata, "generation_type"),
+			metadataString(req.Metadata, "kind"),
+			metadataString(req.Metadata, "category"),
+			metadataString(req.Metadata, "type"),
+		), req)
+	case "version", "model_version":
+		requestModel := strings.TrimSpace(req.Model)
+		if strings.EqualFold(requestModel, rule.ModelName) {
+			requestModel = ""
+		}
+		return strings.ToLower(firstString(
+			metadataString(req.Metadata, field),
+			metadataString(req.Metadata, "model_name"),
+			metadataString(req.Metadata, "model"),
+			metadataString(req.Metadata, "version"),
+			requestModel,
+			rule.DefaultValue,
+		))
+	case "mode":
+		return strings.ToLower(firstString(req.Mode, metadataString(req.Metadata, "mode"), rule.DefaultValue, "normal"))
+	case "with_audio", "audio", "has_audio":
+		if metadataBool(req.Metadata, "with_audio") || metadataBool(req.Metadata, "audio") || metadataBool(req.Metadata, "has_audio") {
+			return "audio"
+		}
+		return "no_audio"
+	case "voice", "voice_id", "has_voice":
+		if metadataBool(req.Metadata, "has_voice") || metadataBool(req.Metadata, "voice") || strings.TrimSpace(metadataString(req.Metadata, "voice_id")) != "" {
+			return "voice"
+		}
+		return "no_voice"
+	case "has_video", "reference_video":
+		if metadataBool(req.Metadata, "has_video") || metadataBool(req.Metadata, "reference_video") || strings.TrimSpace(metadataString(req.Metadata, "video")) != "" {
+			return "video"
+		}
+		return "no_video"
+	case "image_count_range":
+		return imageCountRange(resolveImageCount(req))
+	case "image_count":
+		return strconv.Itoa(resolveImageCount(req))
+	case "effect_scene", "action", "template_id", "feature":
+		return strings.ToLower(firstString(metadataString(req.Metadata, field), metadataString(req.Metadata, "action"), metadataString(req.Metadata, "feature"), rule.DefaultValue))
+	default:
+		return strings.ToLower(firstString(metadataString(req.Metadata, field), rule.DefaultValue))
+	}
+}
+
+func normalizeGenerationType(value string, req relaycommon.TaskSubmitReq) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch {
+	case strings.Contains(value, "multi"), strings.Contains(value, "多图"):
+		return "multi_image"
+	case strings.Contains(value, "image"), strings.Contains(value, "图生"):
+		return "image"
+	case strings.Contains(value, "reference"), strings.Contains(value, "参考"):
+		return "reference"
+	case strings.Contains(value, "text"), strings.Contains(value, "文生"):
+		return "text"
+	}
+	if resolveImageCount(req) > 1 {
+		return "multi_image"
+	}
+	if req.HasImage() || strings.TrimSpace(req.Image) != "" || strings.TrimSpace(req.InputReference) != "" {
+		return "image"
+	}
+	return "text"
 }
 
 func lookupEntry(entries []PricingEntry, key string) (PricingEntry, bool) {

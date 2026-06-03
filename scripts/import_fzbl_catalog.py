@@ -541,6 +541,237 @@ def viduq2_rule(credit_unit_price: Decimal) -> dict[str, Any]:
     }
 
 
+CANK_SPECIAL_MODELS = {
+    "MiniMax-Hailuo-02",
+    "MiniMax-Hailuo-2.3",
+    "MiniMax-Hailuo-2.3-Fast",
+    "aigc-template-effect-vidu",
+    "aigc-video-hailuo",
+    "aigc-video-kling",
+    "aigc-video-vidu",
+    "alibailian-video",
+    "audio1.0",
+    "doubao-seedance-2-0-260128",
+    "doubao-seedance-2-0-fast-260128",
+    "gemini-3-pro-image-preview",
+    "gemini-3.1-flash-image-preview",
+    "jimeng-videos",
+    "kling-advanced-lip-sync",
+    "kling-audio",
+    "kling-avatar-image2video",
+    "kling-effects",
+    "kling-image",
+    "kling-image-recognize",
+    "kling-kolors-virtual-try-on",
+    "kling-motion-control",
+    "kling-multi-elements",
+    "kling-omni-image",
+    "kling-omni-video",
+    "kling-video",
+    "kling-video-extend",
+    "pixverse-image-template",
+    "pixverse-lipsync",
+    "pixverse-mask-selection",
+    "pixverse-mimic",
+    "pixverse-modify",
+    "pixverse-multi-transition",
+    "pixverse-restyle",
+    "pixverse-sound-effect",
+    "pixverse-swap",
+    "pixverse-upload",
+    "pixverse-video",
+    "sora-2",
+    "sora-2-pro",
+    "suno_music_open",
+    "vidu-tts",
+    "vidu2.0",
+    "viduq1",
+    "viduq1-classic",
+    "viduq2",
+    "viduq2-pro",
+    "viduq2-turbo",
+    "viduq3",
+    "viduq3-mix",
+    "viduq3-pro",
+    "viduq3-turbo",
+    "wan2.5-i2v-preview",
+    "wan2.6-i2v",
+    "wan2.6-i2v-flash",
+}
+
+
+def credit_money(multiplier: Decimal | float | int, credit_unit_price: Decimal) -> Decimal:
+    return dec(multiplier) * credit_unit_price
+
+
+def fixed_entry_rule(
+    title: str,
+    description: str,
+    key_fields: list[str],
+    rows: list[dict[str, Any]],
+    credit_unit_price: Decimal,
+    columns: list[dict[str, str]] | None = None,
+    default_duration: int = 0,
+    min_duration: int = 0,
+    max_duration: int = 0,
+    default_value: str = "",
+    unit: str = "次",
+) -> dict[str, Any]:
+    if columns is None:
+        columns = [
+            {"key": "description", "title": "规格"},
+            {"key": "price", "title": "价格"},
+        ]
+    entries = []
+    display_rows = []
+    for row in rows:
+        key = row["key"]
+        price = credit_money(row["credits"], credit_unit_price)
+        entry: dict[str, Any] = {"key": key, "price": float(price), "unit": unit}
+        if "first_credits" in row or "next_credits" in row:
+            entry.pop("price", None)
+            entry["first_second_price"] = float(credit_money(row.get("first_credits", 0), credit_unit_price))
+            if row.get("second_credits") is not None:
+                entry["second_second_price"] = float(credit_money(row.get("second_credits", 0), credit_unit_price))
+            entry["next_second_price"] = float(credit_money(row.get("next_credits", 0), credit_unit_price))
+        if row.get("addons"):
+            entry["addons"] = {name: float(credit_money(value, credit_unit_price)) for name, value in row["addons"].items()}
+        entries.append(entry)
+
+        display = {k: v for k, v in row.items() if k not in {"key", "credits", "first_credits", "second_credits", "next_credits", "addons"}}
+        if "first_credits" in row or "next_credits" in row:
+            first = credit_money(row.get("first_credits", 0), credit_unit_price)
+            second = credit_money(row.get("second_credits", 0), credit_unit_price) if row.get("second_credits") is not None else None
+            next_second = credit_money(row.get("next_credits", 0), credit_unit_price)
+            display["first_second_price"] = float(first)
+            if second is not None:
+                display["second_second_price"] = float(second)
+            display["next_second_price"] = float(next_second)
+            if second is not None:
+                display["price_text"] = f"第1秒{price_text(first)}，第2秒{price_text(second)}，第3秒开始每秒+{price_text(next_second)}"
+            else:
+                display["price_text"] = f"第1秒{price_text(first)}，后续每秒+{price_text(next_second)}"
+        else:
+            display["price"] = float(price)
+            display["price_text"] = price_text(price)
+        display["unit"] = unit
+        display_rows.append(display)
+
+    sections = [
+        {
+            "title": title,
+            "description": description,
+            "unit": unit,
+            "credit_unit_price": float(credit_unit_price),
+            "columns": columns,
+            "rows": display_rows,
+        }
+    ]
+    return {
+        "type": "entry_fields",
+        "credit_unit_price": float(credit_unit_price),
+        "billing_enabled": True,
+        "key_fields": key_fields,
+        "default_duration": default_duration,
+        "min_duration": min_duration,
+        "max_duration": max_duration,
+        "default_value": default_value,
+        "entries": entries,
+        "display": display_config(title, description, unit, credit_unit_price, True, sections),
+    }
+
+
+def per_second_rule(
+    title: str,
+    description: str,
+    key_fields: list[str],
+    rows: list[dict[str, Any]],
+    credit_unit_price: Decimal,
+    columns: list[dict[str, str]],
+    default_duration: int,
+    min_duration: int,
+    max_duration: int,
+    default_value: str = "",
+) -> dict[str, Any]:
+    return fixed_entry_rule(
+        title,
+        description,
+        key_fields,
+        [{**row, "first_credits": row["credits"], "next_credits": row["credits"]} for row in rows],
+        credit_unit_price,
+        columns=columns,
+        default_duration=default_duration,
+        min_duration=min_duration,
+        max_duration=max_duration,
+        default_value=default_value,
+        unit="秒",
+    )
+
+
+def vidu_one_price_rule(model_label: str, rows: list[dict[str, Any]], credit_unit_price: Decimal) -> dict[str, Any]:
+    return fixed_entry_rule(
+        "分组价格",
+        "按 cank 固定规格计费",
+        ["ability", "resolution", "duration"],
+        rows,
+        credit_unit_price,
+        columns=[
+            {"key": "ability", "title": "能力"},
+            {"key": "resolution", "title": "清晰度"},
+            {"key": "duration", "title": "时长"},
+            {"key": "price", "title": "价格"},
+        ],
+        default_duration=5,
+        default_value="1080p",
+        unit="次",
+    )
+
+
+def vidu_q2_variant_rule(model_label: str, table: list[tuple[str, str, Decimal, Decimal | None, Decimal]], credit_unit_price: Decimal) -> dict[str, Any]:
+    rows = []
+    for resolution, label, first, second, next_second in table:
+        row = {
+            "key": f"reference|{resolution}",
+            "ability": "图生&首尾帧",
+            "model": model_label,
+            "resolution": resolution.upper(),
+            "credits": 0,
+            "first_credits": first,
+            "second_credits": second,
+            "next_credits": next_second,
+            "addons": {"with_audio": 15, "recommend_prompt": 10, "prompt_optimizer": 10, "enhance_prompt": 10},
+        }
+        price = f"第1秒{price_text(credit_money(first, credit_unit_price))}"
+        if second is not None:
+            price += f"，第2秒{price_text(credit_money(second, credit_unit_price))}"
+            row["description"] = label
+        price += f"，后续每秒+{price_text(credit_money(next_second, credit_unit_price))}"
+        row["price_text"] = price
+        rows.append(row)
+    rule = fixed_entry_rule(
+        "分组价格",
+        "图生音视频直出额外 💰0.7500；启用推荐提示词额外 💰0.5000",
+        ["ability", "resolution"],
+        rows,
+        credit_unit_price,
+        columns=[
+            {"key": "ability", "title": "能力"},
+            {"key": "model", "title": "模型"},
+            {"key": "resolution", "title": "分辨率"},
+            {"key": "price", "title": "定价"},
+        ],
+        default_duration=5,
+        min_duration=1,
+        max_duration=16,
+        default_value="1080p",
+        unit="次",
+    )
+    for display_row, source in zip(rule["display"]["sections"][0]["rows"], rows):
+        if source.get("price_text"):
+            display_row["price_text"] = source["price_text"]
+    return rule
+
+
 def build_special_pricing(rows: list[dict[str, Any]], credit_unit_price: Decimal) -> dict[str, Any]:
     source_names = {row.get("model_name") for row in rows}
     row_by_name = {row.get("model_name"): row for row in rows}
@@ -590,6 +821,96 @@ def build_special_pricing(rows: list[dict[str, Any]], credit_unit_price: Decimal
 
     if "viduq2" in source_names:
         special["models"]["viduq2"] = viduq2_rule(credit_unit_price)
+
+    if "viduq2-pro" in source_names:
+        special["models"]["viduq2-pro"] = vidu_q2_variant_rule(
+            "Q2-pro",
+            [
+                ("540p", "540P", Decimal("8"), Decimal("10"), Decimal("5")),
+                ("720p", "720P", Decimal("15"), None, Decimal("10")),
+                ("1080p", "1080P", Decimal("55"), None, Decimal("15")),
+            ],
+            credit_unit_price,
+        )
+    if "viduq2-turbo" in source_names:
+        special["models"]["viduq2-turbo"] = vidu_q2_variant_rule(
+            "Q2-turbo",
+            [
+                ("540p", "540P", Decimal("6"), None, Decimal("2")),
+                ("720p", "720P", Decimal("8"), Decimal("10"), Decimal("10")),
+                ("1080p", "1080P", Decimal("35"), None, Decimal("10")),
+            ],
+            credit_unit_price,
+        )
+    if "viduq1" in source_names:
+        special["models"]["viduq1"] = vidu_one_price_rule(
+            "Q1",
+            [
+                {"key": f"{ability}|1080p|5", "ability": label, "resolution": "1080P", "duration": "5S", "credits": 80}
+                for ability, label in [
+                    ("reference", "参考生视频"),
+                    ("image", "图生视频"),
+                    ("text", "文生视频"),
+                ]
+            ]
+            + [{"key": "reference|1080p|5", "ability": "首尾帧", "resolution": "1080P", "duration": "5S", "credits": 80}]
+            + [{"key": "reference|1080p|0", "ability": "参考生图", "resolution": "1080P", "duration": "-", "credits": 20}],
+            credit_unit_price,
+        )
+    if "viduq1-classic" in source_names:
+        special["models"]["viduq1-classic"] = vidu_one_price_rule(
+            "Q1 Classic",
+            [
+                {"key": "image|1080p|5", "ability": "图生视频", "resolution": "1080P", "duration": "5S", "credits": 80},
+                {"key": "reference|1080p|5", "ability": "首尾帧", "resolution": "1080P", "duration": "5S", "credits": 80},
+            ],
+            credit_unit_price,
+        )
+    if "vidu2.0" in source_names:
+        rows = []
+        for ability, label in [("image", "图生视频"), ("reference", "首尾帧")]:
+            for resolution, duration, credits in [
+                ("360p", 4, 20),
+                ("720p", 4, 40),
+                ("720p", 8, 100),
+                ("1080p", 4, 100),
+            ]:
+                rows.append({"key": f"{ability}|{resolution}|{duration}", "ability": label, "resolution": resolution.upper(), "duration": f"{duration}s", "credits": credits})
+        rows.extend(
+            [
+                {"key": "reference|360p|4", "ability": "参考生视频", "resolution": "360P", "duration": "4s", "credits": 80},
+                {"key": "reference|720p|4", "ability": "参考生视频", "resolution": "720P", "duration": "4s", "credits": 80},
+            ]
+        )
+        special["models"]["vidu2.0"] = vidu_one_price_rule("Vidu 2.0", rows, credit_unit_price)
+    if "audio1.0" in source_names:
+        special["models"]["audio1.0"] = fixed_entry_rule(
+            "音频生成",
+            "按时长档位计费，duration 小于等于 5/10 秒匹配对应档位",
+            ["duration_range"],
+            [
+                {"key": "5", "ability": "文生音频 / 可控文生音效", "duration": "小于5秒", "credits": 10},
+                {"key": "10", "ability": "文生音频 / 可控文生音效", "duration": "小于10秒", "credits": 20},
+            ],
+            credit_unit_price,
+            columns=[
+                {"key": "ability", "title": "能力"},
+                {"key": "duration", "title": "时长"},
+                {"key": "price", "title": "价格"},
+            ],
+            default_duration=5,
+            min_duration=1,
+            max_duration=10,
+        )
+    if "vidu-tts" in source_names:
+        special["models"]["vidu-tts"] = fixed_entry_rule(
+            "语音合成",
+            "每 500 字符固定计费",
+            ["feature"],
+            [{"key": "tts", "description": "语音合成 / 500 字符", "credits": 10}],
+            credit_unit_price,
+            default_value="tts",
+        )
 
     if "sora-2" in source_names:
         special["models"]["sora-2"] = {
@@ -691,11 +1012,457 @@ def build_special_pricing(rows: list[dict[str, Any]], credit_unit_price: Decimal
             },
         }
 
-    if "pixverse-video" in source_names:
-        special["models"]["pixverse-video"] = direct_display_only_rule(
-            row_by_name["pixverse-video"],
+    if "kling-image" in source_names:
+        special["models"]["kling-image"] = fixed_entry_rule(
+            "单张价格",
+            "按张计费，参数 n 范围 1-9",
+            ["version", "generation_type", "resolution"],
+            [
+                {"key": "kling-v1|text|1k", "version": "kling-v1", "generation_type": "文生图", "resolution": "1K", "credits": 1},
+                {"key": "kling-v1|image|1k", "version": "kling-v1", "generation_type": "图生图", "resolution": "1K", "credits": 1},
+                {"key": "kling-v1-5|text|1k", "version": "kling-v1-5", "generation_type": "文生图", "resolution": "1K", "credits": 4},
+                {"key": "kling-v1-5|image|1k", "version": "kling-v1-5", "generation_type": "图生图", "resolution": "1K", "credits": 8},
+                {"key": "kling-v2|text|1k", "version": "kling-v2", "generation_type": "文生图", "resolution": "1K/2K", "credits": 4},
+                {"key": "kling-v2|text|2k", "version": "kling-v2", "generation_type": "文生图", "resolution": "1K/2K", "credits": 4},
+                {"key": "kling-v2|image|1k", "version": "kling-v2", "generation_type": "图生图", "resolution": "1K", "credits": 8},
+                {"key": "kling-v2|multi_image|1k", "version": "kling-v2", "generation_type": "多图生图", "resolution": "1K", "credits": 16},
+                {"key": "kling-v2-new|image|1k", "version": "kling-v2-new", "generation_type": "图生图", "resolution": "1K", "credits": 8},
+                {"key": "kling-v2-1|text|1k", "version": "kling-v2-1", "generation_type": "文生图", "resolution": "1K", "credits": 4},
+                {"key": "kling-v2-1|multi_image|1k", "version": "kling-v2-1", "generation_type": "多图生图", "resolution": "1K", "credits": 16},
+                {"key": "kling-v3|text|1k", "version": "kling-v3", "generation_type": "文生图/图生图", "resolution": "1K/2K", "credits": 8},
+                {"key": "kling-v3|image|1k", "version": "kling-v3", "generation_type": "文生图/图生图", "resolution": "1K/2K", "credits": 8},
+                {"key": "kling-v3|text|2k", "version": "kling-v3", "generation_type": "文生图/图生图", "resolution": "1K/2K", "credits": 8},
+                {"key": "kling-v3|image|2k", "version": "kling-v3", "generation_type": "文生图/图生图", "resolution": "1K/2K", "credits": 8},
+                {"key": "-|outpaint|1k", "version": "-", "generation_type": "扩图", "resolution": "1K", "credits": 8},
+            ],
             credit_unit_price,
-            "当前项目没有完整 PixVerse 任务适配器，暂只展示，不启用真实特殊扣费",
+            columns=[
+                {"key": "version", "title": "模型版本"},
+                {"key": "generation_type", "title": "生成类型"},
+                {"key": "resolution", "title": "分辨率"},
+                {"key": "price", "title": "单张价格"},
+            ],
+            default_value="kling-v1",
+        )
+    if "kling-omni-image" in source_names:
+        special["models"]["kling-omni-image"] = fixed_entry_rule(
+            "单张价格",
+            "按张计费，参数 n 范围 1-9",
+            ["version", "resolution"],
+            [
+                {"key": "kling-image-o1|1k", "version": "kling-image-o1", "generation_type": "文生图/图生图", "resolution": "1K/2K", "credits": 1},
+                {"key": "kling-image-o1|2k", "version": "kling-image-o1", "generation_type": "文生图/图生图", "resolution": "1K/2K", "credits": 1},
+                {"key": "kling-v3-omni|1k", "version": "kling-v3-omni", "generation_type": "文生图/图生图", "resolution": "1K/2K", "credits": 1},
+                {"key": "kling-v3-omni|2k", "version": "kling-v3-omni", "generation_type": "文生图/图生图", "resolution": "1K/2K", "credits": 1},
+                {"key": "kling-v3-omni|4k", "version": "kling-v3-omni", "generation_type": "文生图/图生图", "resolution": "4K", "credits": 2},
+            ],
+            credit_unit_price,
+            columns=[
+                {"key": "version", "title": "模型版本"},
+                {"key": "generation_type", "title": "生成类型"},
+                {"key": "resolution", "title": "分辨率"},
+                {"key": "price", "title": "单张价格"},
+            ],
+            default_value="kling-image-o1",
+        )
+    if "kling-omni-video" in source_names:
+        rows = [
+            ("kling-video-o1", "std", "no_video", "no_audio", Decimal("0.6")),
+            ("kling-video-o1", "std", "video", "no_audio", Decimal("0.9")),
+            ("kling-video-o1", "pro", "no_video", "no_audio", Decimal("0.8")),
+            ("kling-video-o1", "pro", "video", "no_audio", Decimal("1.2")),
+            ("kling-v3-omni", "std", "no_video", "no_audio", Decimal("0.6")),
+            ("kling-v3-omni", "std", "no_video", "audio", Decimal("0.8")),
+            ("kling-v3-omni", "std", "video", "no_audio", Decimal("0.9")),
+            ("kling-v3-omni", "pro", "no_video", "no_audio", Decimal("0.8")),
+            ("kling-v3-omni", "pro", "no_video", "audio", Decimal("1")),
+            ("kling-v3-omni", "pro", "video", "no_audio", Decimal("1.2")),
+        ]
+        special["models"]["kling-omni-video"] = per_second_rule(
+            "分组价格",
+            "按版本、模式、参考视频和音频按秒计费",
+            ["version", "mode", "has_video", "with_audio"],
+            [
+                {"key": f"{version}|{mode}|{has_video}|{audio}", "version": version, "mode": mode, "has_video": has_video, "has_audio": audio, "credits": credits}
+                for version, mode, has_video, audio, credits in rows
+            ],
+            credit_unit_price,
+            columns=[
+                {"key": "version", "title": "模型版本"},
+                {"key": "mode", "title": "模式"},
+                {"key": "has_video", "title": "是否有参考视频"},
+                {"key": "has_audio", "title": "音频"},
+                {"key": "price", "title": "每秒价格"},
+            ],
+            default_duration=5,
+            min_duration=3,
+            max_duration=15,
+            default_value="kling-video-o1",
+        )
+    if "kling-effects" in source_names:
+        effect_rows = [
+            ("ultra_high", "超高价特效", 9, "如 french_elegance, flash_drive 等"),
+            ("high", "高价特效", 7, "如 bullet_time, sedan_chair_dance 等"),
+            ("mid_high", "中高价特效", 5, "如 daoma_dance, expression_challenge 等"),
+            ("mid", "中价特效", Decimal("3.5"), "如 birthday_star, happy_birthday 等"),
+            ("mid_low", "中低价特效", 2, "如 running_man, angel_wing 等"),
+            ("low", "低价特效", Decimal("1.5"), "如 hug_pro, kiss_pro 等"),
+            ("base", "超低价特效", 1, "如 a_list_look, boss_coming 等"),
+        ]
+        special["models"]["kling-effects"] = fixed_entry_rule(
+            "特效价格",
+            "按 effect_scene 固定价格计费；完整 effect_scene 映射需由请求传入对应档位 key",
+            ["effect_scene"],
+            [{"key": key, "effect_type": label, "description": note, "credits": credits} for key, label, credits, note in effect_rows],
+            credit_unit_price,
+            columns=[
+                {"key": "effect_type", "title": "特效类型"},
+                {"key": "price", "title": "价格示例"},
+                {"key": "description", "title": "说明"},
+            ],
+            default_value="base",
+        )
+    if "kling-audio" in source_names:
+        special["models"]["kling-audio"] = fixed_entry_rule(
+            "音频",
+            "按功能固定计费",
+            ["feature"],
+            [
+                {"key": "text_sound", "feature": "文生音效", "credits": 5},
+                {"key": "video_sound", "feature": "视频生音效", "credits": 5},
+                {"key": "tts", "feature": "语音合成", "credits": 1},
+            ],
+            credit_unit_price,
+            columns=[
+                {"key": "feature", "title": "模型"},
+                {"key": "price", "title": "价格"},
+            ],
+            default_value="text_sound",
+        )
+    if "kling-multi-elements" in source_names:
+        special["models"]["kling-multi-elements"] = fixed_entry_rule(
+            "多元素视频",
+            "按版本、模式、时长计费",
+            ["version", "mode", "duration"],
+            [
+                {"key": "kling-v1-6|std|5", "version": "kling-v1-6", "mode": "std", "duration": "5s", "credits": 3},
+                {"key": "kling-v1-6|std|10", "version": "kling-v1-6", "mode": "std", "duration": "10s", "credits": 6},
+                {"key": "kling-v1-6|pro|5", "version": "kling-v1-6", "mode": "pro", "duration": "5s", "credits": 5},
+                {"key": "kling-v1-6|pro|10", "version": "kling-v1-6", "mode": "pro", "duration": "10s", "credits": 10},
+            ],
+            credit_unit_price,
+            columns=[
+                {"key": "version", "title": "模型版本"},
+                {"key": "mode", "title": "模式"},
+                {"key": "duration", "title": "时长"},
+                {"key": "price", "title": "价格"},
+            ],
+            default_duration=5,
+            min_duration=5,
+            max_duration=10,
+            default_value="kling-v1-6",
+        )
+    if "kling-image-recognize" in source_names:
+        special["models"]["kling-image-recognize"] = fixed_entry_rule(
+            "图像识别",
+            "每次固定计费",
+            ["feature"],
+            [{"key": "recognize", "description": "图像识别", "credits": 1}],
+            credit_unit_price,
+            default_value="recognize",
+        )
+    if "kling-video-extend" in source_names:
+        rows = []
+        for version, std, pro in [("kling-v1", 1, Decimal("3.5")), ("kling-v1-5", 2, Decimal("3.5")), ("kling-v1-6", 2, Decimal("3.5"))]:
+            rows.append({"key": f"{version}|std", "version": version, "mode": "std", "duration": "4~5s", "credits": std})
+            rows.append({"key": f"{version}|pro", "version": version, "mode": "pro", "duration": "4~5s", "credits": pro})
+        special["models"]["kling-video-extend"] = fixed_entry_rule(
+            "视频延长",
+            "按版本和模式固定计费",
+            ["version", "mode"],
+            rows,
+            credit_unit_price,
+            columns=[
+                {"key": "version", "title": "模型版本"},
+                {"key": "mode", "title": "模式"},
+                {"key": "duration", "title": "时长"},
+                {"key": "price", "title": "价格"},
+            ],
+            default_value="kling-v1",
+        )
+    if "kling-avatar-image2video" in source_names:
+        special["models"]["kling-avatar-image2video"] = per_second_rule(
+            "数字人图生视频",
+            "按模式和秒数计费",
+            ["mode"],
+            [
+                {"key": "std", "mode": "std", "credits": 1},
+                {"key": "pro", "mode": "pro", "credits": 2},
+            ],
+            credit_unit_price,
+            columns=[
+                {"key": "mode", "title": "模式"},
+                {"key": "price", "title": "价格（按秒计费）"},
+            ],
+            default_duration=5,
+            min_duration=1,
+            max_duration=60,
+            default_value="std",
+        )
+    if "kling-advanced-lip-sync" in source_names:
+        special["models"]["kling-advanced-lip-sync"] = fixed_entry_rule(
+            "高级对口型",
+            "人脸识别按次；对口型按每 5 秒档位计费",
+            ["feature"],
+            [
+                {"key": "face_detect", "feature": "人脸识别", "credits": Decimal("0.1")},
+                {"key": "lip_sync", "feature": "对口型 / 每5秒", "credits": 1},
+            ],
+            credit_unit_price,
+            columns=[
+                {"key": "feature", "title": "类型"},
+                {"key": "price", "title": "价格"},
+            ],
+            default_value="lip_sync",
+        )
+    if "kling-motion-control" in source_names:
+        special["models"]["kling-motion-control"] = per_second_rule(
+            "动作控制",
+            "按模式按秒计费",
+            ["mode"],
+            [
+                {"key": "std", "mode": "std/720P", "credits": Decimal("50") / Decimal("30")},
+                {"key": "pro", "mode": "pro/1080P", "credits": Decimal("80") / Decimal("30")},
+            ],
+            credit_unit_price,
+            columns=[
+                {"key": "mode", "title": "模式"},
+                {"key": "price", "title": "每秒价格"},
+            ],
+            default_duration=5,
+            min_duration=5,
+            max_duration=10,
+            default_value="std",
+        )
+
+    if "pixverse-video" in source_names:
+        rows = []
+        for version, table in {
+            "c1": [("360p", 6, 8), ("540p", 8, 10), ("720p", 10, 13), ("1080p", 19, 24)],
+            "v6": [("360p", 5, 7), ("540p", 7, 9), ("720p", 9, 12), ("1080p", 18, 23)],
+        }.items():
+            for resolution, no_audio, audio in table:
+                rows.append({"key": f"{version}|{resolution}|no_audio", "version": version.upper(), "resolution": resolution, "with_audio": "不带声音", "credits": no_audio})
+                rows.append({"key": f"{version}|{resolution}|audio", "version": version.upper(), "resolution": resolution, "with_audio": "带声音", "credits": audio})
+        special["models"]["pixverse-video"] = per_second_rule(
+            "视频生成",
+            "C1/V6 按秒计费；旧版本按次模板价在展示中保留，真实扣费优先使用 version/resolution/audio",
+            ["version", "resolution", "with_audio"],
+            rows,
+            credit_unit_price,
+            columns=[
+                {"key": "version", "title": "版本"},
+                {"key": "resolution", "title": "分辨率"},
+                {"key": "with_audio", "title": "声音"},
+                {"key": "price", "title": "每秒价格"},
+            ],
+            default_duration=5,
+            min_duration=1,
+            max_duration=30,
+            default_value="c1",
+        )
+    for pix_model, title, credits in [
+        ("pixverse-lipsync", "音频对口型", 4),
+        ("pixverse-restyle", "视频重绘", 10),
+        ("pixverse-sound-effect", "音效生成", 2),
+    ]:
+        if pix_model in source_names:
+            special["models"][pix_model] = per_second_rule(
+                title,
+                "按 duration 秒数计费",
+                ["feature"],
+                [{"key": "default", "description": title, "credits": credits}],
+                credit_unit_price,
+                columns=[
+                    {"key": "description", "title": "计费方式"},
+                    {"key": "price", "title": "每秒价格"},
+                ],
+                default_duration=5,
+                min_duration=1,
+                max_duration=300,
+                default_value="default",
+            )
+    if "pixverse-multi-transition" in source_names:
+        base_360 = {1: 23, 2: 27, 3: 32, 4: 36, 5: 45, 6: 59, 7: 72, 8: 90, 9: 95, 10: 99, 11: 104, 12: 108, 13: 117, 14: 126, 15: 135, 16: 144, 17: 153, 18: 162, 19: 171, 20: 180, 21: 189, 22: 198, 23: 207, 24: 216, 25: 225, 26: 234, 27: 243, 28: 252, 29: 261, 30: 270}
+        base_720 = {1: 30, 2: 36, 3: 42, 4: 48, 5: 60, 6: 78, 7: 96, 8: 120, 9: 126, 10: 132, 11: 138, 12: 144, 13: 156, 14: 168, 15: 180, 16: 192, 17: 204, 18: 216, 19: 228, 20: 240, 21: 252, 22: 264, 23: 276, 24: 288, 25: 300, 26: 312, 27: 324, 28: 336, 29: 348, 30: 360}
+        rows = []
+        for duration in range(1, 31):
+            for resolution, credits in [("360p", base_360[duration]), ("540p", base_360[duration]), ("720p", base_720[duration]), ("1080p", base_720[duration] * 2)]:
+                rows.append({"key": f"{resolution}|{duration}", "resolution": resolution.upper(), "duration": f"{duration}s", "credits": credits})
+        special["models"]["pixverse-multi-transition"] = fixed_entry_rule(
+            "多图转场",
+            "按总时长与分辨率固定计费；总时长 = 每帧 duration 求和",
+            ["resolution", "duration"],
+            rows,
+            credit_unit_price,
+            columns=[
+                {"key": "resolution", "title": "分辨率"},
+                {"key": "duration", "title": "视频总时长"},
+                {"key": "price", "title": "价格"},
+            ],
+            default_duration=5,
+            min_duration=1,
+            max_duration=30,
+            default_value="720p",
+        )
+    for pix_model, title, table in [
+        ("pixverse-swap", "换脸/替换", {"360p": 9, "540p": 9, "720p": 12}),
+        ("pixverse-mimic", "动作模仿", {"360p": 9, "540p": 10, "720p": 12}),
+        ("pixverse-modify", "视频修改", {"360p": 8, "540p": 10, "720p": 12}),
+    ]:
+        if pix_model in source_names:
+            special["models"][pix_model] = per_second_rule(
+                title,
+                "按分辨率和秒数计费",
+                ["resolution"],
+                [{"key": resolution, "resolution": resolution.upper(), "credits": credits} for resolution, credits in table.items()],
+                credit_unit_price,
+                columns=[
+                    {"key": "resolution", "title": "分辨率"},
+                    {"key": "price", "title": "每秒价格"},
+                ],
+                default_duration=5,
+                min_duration=1,
+                max_duration=300,
+                default_value="540p",
+            )
+    if "pixverse-mask-selection" in source_names:
+        special["models"]["pixverse-mask-selection"] = fixed_entry_rule("Mask 抠图", "同步固定计费", ["feature"], [{"key": "mask", "description": "Mask 抠图", "credits": 2}], credit_unit_price, default_value="mask")
+    if "pixverse-image-template" in source_names:
+        special["models"]["pixverse-image-template"] = fixed_entry_rule("图片模板", "模板价格按 action/template_id 档位计费", ["feature"], [{"key": "image_template", "description": "图片模板基础价", "credits": 1}], credit_unit_price, default_value="image_template")
+
+    for model_name, rows, default_resolution, max_duration in [
+        (
+            "wan2.5-i2v-preview",
+            [("480p", Decimal("0.3")), ("720p", Decimal("0.6")), ("1080p", Decimal("1"))],
+            "480p",
+            10,
+        ),
+        (
+            "wan2.6-i2v",
+            [("720p", Decimal("0.6")), ("1080p", Decimal("1"))],
+            "720p",
+            15,
+        ),
+        (
+            "wan2.6-i2v-flash",
+            [("720p", Decimal("0.6")), ("1080p", Decimal("1"))],
+            "720p",
+            10,
+        ),
+    ]:
+        if model_name in source_names:
+            special["models"][model_name] = per_second_rule(
+                "视频生成",
+                "按分辨率和秒数计费",
+                ["resolution"],
+                [{"key": resolution, "resolution": resolution.upper(), "credits": credits} for resolution, credits in rows],
+                credit_unit_price,
+                columns=[
+                    {"key": "resolution", "title": "分辨率"},
+                    {"key": "price", "title": "每秒价格"},
+                ],
+                default_duration=5,
+                min_duration=1,
+                max_duration=max_duration,
+                default_value=default_resolution,
+            )
+    for model_name, rows in [
+        (
+            "MiniMax-Hailuo-02",
+            [
+                ("768p", 6, 1),
+                ("768p", 10, 2),
+                ("1080p", 6, Decimal("1.75")),
+                ("512p", 6, Decimal("0.3")),
+                ("512p", 10, Decimal("0.5")),
+            ],
+        ),
+        (
+            "MiniMax-Hailuo-2.3",
+            [
+                ("768p", 6, 1),
+                ("768p", 10, 2),
+                ("1080p", 6, Decimal("1.75")),
+            ],
+        ),
+    ]:
+        if model_name in source_names:
+            special["models"][model_name] = fixed_entry_rule(
+                "视频生成",
+                "按分辨率与时长固定计费",
+                ["resolution", "duration"],
+                [
+                    {"key": f"{resolution}|{duration}", "version": model_name, "resolution": resolution.upper(), "duration": f"{duration}s", "credits": credits}
+                    for resolution, duration, credits in rows
+                ],
+                credit_unit_price,
+                columns=[
+                    {"key": "version", "title": "模型版本"},
+                    {"key": "resolution", "title": "分辨率"},
+                    {"key": "duration", "title": "时长"},
+                    {"key": "price", "title": "价格"},
+                ],
+                default_duration=6,
+                min_duration=6,
+                max_duration=10,
+                default_value="768p",
+            )
+    if "gemini-3-pro-image-preview" in source_names:
+        special["models"]["gemini-3-pro-image-preview"] = fixed_entry_rule(
+            "图像生成",
+            "按分辨率固定计费",
+            ["resolution"],
+            [
+                {"key": "1k", "resolution": "1K", "credits": 1},
+                {"key": "2k", "resolution": "2K", "credits": 1},
+                {"key": "4k", "resolution": "4K", "credits": Decimal("1.79")},
+            ],
+            credit_unit_price,
+            columns=[{"key": "resolution", "title": "分辨率"}, {"key": "price", "title": "价格"}],
+            default_value="1k",
+        )
+    if "gemini-3.1-flash-image-preview" in source_names:
+        special["models"]["gemini-3.1-flash-image-preview"] = fixed_entry_rule(
+            "图像生成",
+            "按分辨率固定计费",
+            ["resolution"],
+            [
+                {"key": "512", "resolution": "512", "credits": Decimal("0.66696")},
+                {"key": "1k", "resolution": "1K", "credits": 1},
+                {"key": "2k", "resolution": "2K", "credits": 1},
+                {"key": "4k", "resolution": "4K", "credits": Decimal("1.78571")},
+            ],
+            credit_unit_price,
+            columns=[{"key": "resolution", "title": "分辨率"}, {"key": "price", "title": "价格"}],
+            default_value="1k",
+        )
+    if "suno_music_open" in source_names:
+        special["models"]["suno_music_open"] = fixed_entry_rule(
+            "音乐生成",
+            "按功能固定计费；免费功能显式为 0",
+            ["feature"],
+            [
+                {"key": "create", "feature": "发起创作", "credits": 10},
+                {"key": "sound_effect", "feature": "生成音效", "credits": 2},
+                {"key": "lyrics", "feature": "生成歌词", "credits": 0},
+                {"key": "style", "feature": "提升音乐风格", "credits": 0},
+                {"key": "upload", "feature": "上传参考音频", "credits": 0},
+                {"key": "persona", "feature": "创建歌手风格(Persona)", "credits": 0},
+            ],
+            credit_unit_price,
+            columns=[{"key": "feature", "title": "功能"}, {"key": "price", "title": "价格"}],
+            default_value="create",
         )
 
     for model_name, rule in list(special["models"].items()):
@@ -717,13 +1484,6 @@ def build_special_pricing(rows: list[dict[str, Any]], credit_unit_price: Decimal
         display["billing_enabled"] = bool(rule.get("billing_enabled"))
         rule["display"] = display
         special["models"][model_name] = rule
-
-    display_only_reason = "cank 中存在特殊展示/计费分支，但当前项目无法安全从请求中推导完整规格，先仅展示不启用特殊扣费"
-    for row in rows:
-        model_name = row.get("model_name")
-        if not model_name or model_name in special["models"] or not looks_special(str(model_name)):
-            continue
-        special["models"][model_name] = direct_display_only_rule(row, credit_unit_price, display_only_reason)
 
     return special
 
@@ -980,6 +1740,12 @@ def main() -> int:
     option_maps = build_option_maps(models, fzbl, credit_unit_price)
     special_models = (option_maps.get("SpecialModelPricing") or {}).get("models", {})
     skipped = [item for item in skipped if item.get("model_name") not in special_models]
+    source_names = {row.get("model_name") for row in rows}
+    missing_from_fzbl_special_models = sorted(CANK_SPECIAL_MODELS - source_names)
+    fzbl_cank_special_models = sorted(CANK_SPECIAL_MODELS & source_names)
+    fzbl_cank_special_without_billing = sorted(
+        name for name in fzbl_cank_special_models if not (special_models.get(name) or {}).get("billing_enabled")
+    )
     key_for_sql = args.key or "__DRY_RUN_KEY__"
     channels = build_channels(models, key_for_sql, args.base_url)
     sql = build_sql(fzbl.get("vendors") or [], models, cleanup_virtuals, channels, option_maps)
@@ -999,6 +1765,9 @@ def main() -> int:
         "display_only_special_models": sorted(
             name for name, rule in special_models.items() if not rule.get("billing_enabled")
         ),
+        "missing_from_fzbl_special_models": missing_from_fzbl_special_models,
+        "fzbl_cank_special_models": fzbl_cank_special_models,
+        "fzbl_cank_special_without_billing": fzbl_cank_special_without_billing,
         "special_min_prices": {
             name: (rule.get("display") or {}).get("min_price")
             for name, rule in sorted(special_models.items())

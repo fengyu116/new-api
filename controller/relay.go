@@ -155,6 +155,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		newAPIError = types.NewError(err, types.ErrorCodeModelPriceError, types.ErrOptionWithStatusCode(http.StatusBadRequest))
 		return
 	}
+	if _, err := helper.ApplySpecialModelPricingForRequest(c, relayInfo, &priceData, request); err != nil {
+		newAPIError = types.NewError(err, types.ErrorCodeModelPriceError, types.ErrOptionWithStatusCode(http.StatusBadRequest))
+		return
+	}
 
 	// common.SetContextKey(c, constant.ContextKeyTokenCountMeta, meta)
 
