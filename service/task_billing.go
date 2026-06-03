@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	"github.com/QuantumNous/new-api/setting/special_pricing"
 	"github.com/gin-gonic/gin"
 )
 
@@ -49,6 +50,19 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo) {
 	if info.IsModelMapped {
 		other["is_model_mapped"] = true
 		other["upstream_model_name"] = info.UpstreamModelName
+	}
+	if matched, ok := c.Get("special_pricing_match"); ok {
+		if special, ok := matched.(special_pricing.MatchResult); ok {
+			other["special_pricing"] = true
+			other["special_rule"] = special.RuleKey
+			other["special_duration"] = special.Duration
+			other["special_multiplier"] = special.Multiplier
+			other["special_unit_price"] = special.UnitPrice
+			other["special_final_price"] = special.FinalPrice
+			for key, value := range special.Spec {
+				other["special_"+key] = value
+			}
+		}
 	}
 	model.RecordConsumeLog(c, info.UserId, model.RecordConsumeLogParams{
 		ChannelId: info.ChannelId,

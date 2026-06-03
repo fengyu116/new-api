@@ -54,6 +54,7 @@ export type PricingModel = {
   billing_mode?: string
   /** Raw expression describing dynamic / tiered billing */
   billing_expr?: string
+  special_pricing?: SpecialPricingDisplay
   /** Pricing version returned by backend, useful for cache busting */
   pricing_version?: string
   /**
@@ -70,6 +71,32 @@ export type PricingModel = {
   input_modalities?: Modality[]
   output_modalities?: Modality[]
   capabilities?: ModelCapability[]
+}
+
+export type SpecialPricingColumn = {
+  key: string
+  title: string
+}
+
+export type SpecialPricingRow = {
+  ability?: string
+  resolution?: string
+  version?: string
+  mode?: string
+  duration?: string
+  description?: string
+  multiplier: number
+  unit?: string
+}
+
+export type SpecialPricingDisplay = {
+  title?: string
+  description?: string
+  unit?: string
+  credit_unit_price?: number
+  billing_enabled: boolean
+  columns?: SpecialPricingColumn[]
+  rows?: SpecialPricingRow[]
 }
 
 /** Input/output modalities supported by a model. */

@@ -40,6 +40,85 @@ const ModelPricingTable = ({
     ? modelData.enable_groups
     : [];
   const autoChain = autoGroups.filter((g) => modelEnableGroups.includes(g));
+  const renderSpecialPricingTable = () => {
+    const special = modelData?.special_pricing;
+    if (!special || !Array.isArray(special.rows) || special.rows.length === 0) {
+      return null;
+    }
+    const availableGroups = Object.keys(usableGroup || {})
+      .filter((g) => g !== '')
+      .filter((g) => g !== 'auto')
+      .filter((g) => modelEnableGroups.includes(g));
+    const groups = availableGroups.length > 0 ? availableGroups : ['default'];
+    const unitPrice = Number(special.credit_unit_price || 0);
+    const columns = [
+      {
+        title: t('分组'),
+        dataIndex: 'group',
+        render: (text) => (
+          <Tag color='white' size='small' shape='circle'>
+            {text}
+            {t('分组')}
+          </Tag>
+        ),
+      },
+      ...(special.columns || [])
+        .filter((col) => col.key !== 'price')
+        .map((col) => ({
+          title: t(col.title || col.key),
+          dataIndex: col.key,
+          render: (text) => text || '-',
+        })),
+      {
+        title: t('价格'),
+        dataIndex: 'price',
+        render: (_, row) => (
+          <div>
+            <div className='font-semibold text-orange-600'>
+              {row.multiplier > 0 ? displayPrice(row.price) : '-'}
+            </div>
+            <div className='text-xs text-gray-500'>
+              / {t(row.unit || special.unit || '次')}
+            </div>
+          </div>
+        ),
+      },
+    ];
+    const tableData = groups.flatMap((group) => {
+      const ratio = groupRatio && groupRatio[group] ? groupRatio[group] : 1;
+      return special.rows.map((row, index) => ({
+        key: `${group}-${index}`,
+        group,
+        ...row,
+        multiplier: Number(row.multiplier || 0),
+        price: unitPrice * Number(row.multiplier || 0) * ratio,
+        unit: row.unit || special.unit,
+      }));
+    });
+
+    return (
+      <div className='mb-5'>
+        <div className='text-sm font-medium mb-1'>
+          {special.title || t('特殊规格价格')}
+        </div>
+        {special.description && (
+          <div className='text-xs text-gray-500 mb-2'>
+            {special.description}
+            {!special.billing_enabled ? ` · ${t('仅展示，未启用特殊扣费')}` : ''}
+          </div>
+        )}
+        <Table
+          dataSource={tableData}
+          columns={columns}
+          pagination={false}
+          size='small'
+          bordered={false}
+          className='!rounded-lg'
+        />
+      </div>
+    );
+  };
+
   const renderGroupPriceTable = () => {
     // 仅展示模型可用的分组：模型 enable_groups 与用户可用分组的交集
 
@@ -193,6 +272,7 @@ const ModelPricingTable = ({
           ))}
         </div>
       )}
+      {renderSpecialPricingTable()}
       {renderGroupPriceTable()}
     </div>
   );

@@ -21,6 +21,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useParams, useSearch } from '@tanstack/react-router'
 import { ArrowLeft, Code2, HeartPulse, Info, Timer } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { formatBillingCurrencyFromUSD } from '@/lib/currency'
 import { getLobeIcon } from '@/lib/lobe-icon'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -68,6 +69,7 @@ import type {
   ModelCapability,
   PriceType,
   PricingModel,
+  SpecialPricingRow,
   TokenUnit,
 } from '../types'
 import { DynamicPricingBreakdown } from './dynamic-pricing-breakdown'
@@ -587,6 +589,112 @@ function AutoGroupChain(props: { model: PricingModel; autoGroups: string[] }) {
 }
 
 // ----------------------------------------------------------------------------
+// Special pricing table
+// ----------------------------------------------------------------------------
+
+function SpecialPricingSection(props: {
+  model: PricingModel
+  groupRatio: Record<string, number>
+  usableGroup: Record<string, { desc: string; ratio: number }>
+  priceRate: number
+  usdExchangeRate: number
+  showRechargePrice: boolean
+}) {
+  const { t } = useTranslation()
+  const special = props.model.special_pricing
+  const availableGroups = useMemo(
+    () => getAvailableGroups(props.model, props.usableGroup || {}),
+    [props.model, props.usableGroup]
+  )
+  if (!special?.rows?.length) return null
+
+  const groups = availableGroups.length > 0 ? availableGroups : ['default']
+  const unitPrice = Number(special.credit_unit_price || 0)
+  const columns = (special.columns || []).filter((column) => column.key !== 'price')
+  const valueFor = (row: SpecialPricingRow, key: string) => {
+    const value = row[key as keyof SpecialPricingRow]
+    if (value == null || value === '') return '-'
+    return String(value)
+  }
+  const formatPrice = (price: number) =>
+    formatBillingCurrencyFromUSD(
+      props.showRechargePrice
+        ? price * props.priceRate / props.usdExchangeRate
+        : price,
+      { digitsLarge: 4, digitsSmall: 6, abbreviate: false }
+    )
+
+  return (
+    <div className='mb-4 rounded-lg border p-3'>
+      <div className='mb-2'>
+        <div className='text-sm font-medium'>
+          {special.title || t('Special Pricing')}
+        </div>
+        {special.description && (
+          <p className='text-muted-foreground mt-1 text-xs'>
+            {special.description}
+            {!special.billing_enabled
+              ? ` · ${t('Display only, special billing is not enabled')}`
+              : ''}
+          </p>
+        )}
+      </div>
+      <div className='overflow-x-auto'>
+        <Table className='text-sm'>
+          <TableHeader>
+            <TableRow className='hover:bg-transparent'>
+              <TableHead className='text-muted-foreground py-2 text-[10px] font-medium tracking-wider uppercase'>
+                {t('Group')}
+              </TableHead>
+              {columns.map((column) => (
+                <TableHead
+                  key={column.key}
+                  className='text-muted-foreground py-2 text-[10px] font-medium tracking-wider uppercase'
+                >
+                  {t(column.title || column.key)}
+                </TableHead>
+              ))}
+              <TableHead className='text-muted-foreground py-2 text-right text-[10px] font-medium tracking-wider uppercase'>
+                {t('Price')}
+              </TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {groups.flatMap((group) => {
+              const ratio = props.groupRatio[group] || 1
+              return special.rows!.map((row, index) => {
+                const price = unitPrice * Number(row.multiplier || 0) * ratio
+                const hasPrice = Number(row.multiplier || 0) > 0
+                return (
+                  <TableRow key={`${group}-${index}`}>
+                    <TableCell>
+                      <GroupBadge group={group} size='sm' />
+                    </TableCell>
+                    {columns.map((column) => (
+                      <TableCell key={column.key}>
+                        {valueFor(row, column.key)}
+                      </TableCell>
+                    ))}
+                    <TableCell className='text-right'>
+                      <span className='font-mono font-semibold tabular-nums'>
+                        {hasPrice ? formatPrice(price) : '-'}
+                      </span>
+                      <span className='text-muted-foreground/50 ml-1 text-xs'>
+                        / {t(row.unit || special.unit || 'request')}
+                      </span>
+                    </TableCell>
+                  </TableRow>
+                )
+              })
+            })}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  )
+}
+
+// ----------------------------------------------------------------------------
 // Group pricing table
 // ----------------------------------------------------------------------------
 
@@ -772,6 +880,14 @@ function GroupPricingSection(props: {
     <section>
       <SectionTitle>{t('Pricing by Group')}</SectionTitle>
       <AutoGroupChain model={props.model} autoGroups={props.autoGroups} />
+      <SpecialPricingSection
+        model={props.model}
+        groupRatio={props.groupRatio}
+        usableGroup={props.usableGroup}
+        priceRate={props.priceRate}
+        usdExchangeRate={props.usdExchangeRate}
+        showRechargePrice={showRechargePrice}
+      />
       <div className='-mx-4 overflow-x-auto sm:mx-0'>
         <Table className='text-sm'>
           <TableHeader>
