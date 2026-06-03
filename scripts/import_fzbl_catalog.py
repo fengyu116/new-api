@@ -378,6 +378,18 @@ def min_price_from_sections(sections: list[dict[str, Any]]) -> Decimal:
     return min(prices) if prices else Decimal("0")
 
 
+def sections_have_price(sections: list[dict[str, Any]]) -> bool:
+    for section in sections:
+        for row in section.get("rows") or []:
+            if (
+                row.get("price") is not None
+                or row.get("first_second_price") is not None
+                or row.get("multiplier") is not None
+            ):
+                return True
+    return False
+
+
 def display_config(
     title: str,
     description: str,
@@ -389,6 +401,7 @@ def display_config(
 ) -> dict[str, Any]:
     min_price = min_price_from_sections(sections)
     first = sections[0] if sections else {}
+    min_price_text = f"{price_text(min_price)} 起" if sections_have_price(sections) else ""
     return {
         "title": title,
         "description": description,
@@ -401,7 +414,7 @@ def display_config(
         "sections": sections,
         "min_price": float(min_price),
         "min_price_unit": unit,
-        "min_price_text": f"{price_text(min_price)} 起" if min_price > 0 else "",
+        "min_price_text": min_price_text,
     }
 
 
@@ -1480,7 +1493,7 @@ def build_special_pricing(rows: list[dict[str, Any]], credit_unit_price: Decimal
         min_price = min_price_from_sections(display["sections"])
         display["min_price"] = float(min_price)
         display["min_price_unit"] = display.get("unit") or "次"
-        display["min_price_text"] = f"{price_text(min_price)} 起" if min_price > 0 else ""
+        display["min_price_text"] = f"{price_text(min_price)} 起" if sections_have_price(display["sections"]) else ""
         display["billing_enabled"] = bool(rule.get("billing_enabled"))
         rule["display"] = display
         special["models"][model_name] = rule
