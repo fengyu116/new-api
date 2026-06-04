@@ -441,11 +441,14 @@ const RechargeCard = ({
                         preset.discount ||
                         topupInfo?.discount?.[preset.value] ||
                         1.0;
+                      const topupGroupRatio =
+                        Number(topupInfo?.topup_group_ratio) || 1.0;
                       const originalPrice = preset.value * priceRatio;
-                      const discountedPrice = originalPrice * discount;
-                      const hasDiscount = discount < 1.0;
+                      const discountedPrice =
+                        originalPrice * topupGroupRatio * discount;
+                      const hasDiscount = discountedPrice < originalPrice;
                       const actualPay = discountedPrice;
-                      const save = originalPrice - discountedPrice;
+                      const save = Math.max(0, originalPrice - discountedPrice);
 
                       // 根据当前货币类型换算显示金额和数量
                       const { symbol, rate, type } = getCurrencyConfig();

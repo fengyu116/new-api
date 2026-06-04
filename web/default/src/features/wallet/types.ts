@@ -134,6 +134,8 @@ export interface TopupInfo {
   amount_options: number[]
   /** Discount rates by amount */
   discount: Record<number, number>
+  /** Current user's multiplier for topup payments */
+  topup_group_ratio?: number
   /** Optional topup link for purchasing codes */
   topup_link?: string
   /** Whether Creem topup is enabled */

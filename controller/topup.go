@@ -23,6 +23,7 @@ import (
 
 func GetTopUpInfo(c *gin.Context) {
 	complianceConfirmed := operation_setting.IsPaymentComplianceConfirmed()
+	topupGroupRatio := normalizedTopupGroupRatio(c.GetString("group"))
 
 	// 获取支付方式
 	payMethods := operation_setting.PayMethods
@@ -118,6 +119,7 @@ func GetTopUpInfo(c *gin.Context) {
 		"waffo_pancake_min_topup": setting.WaffoPancakeMinTopUp,
 		"amount_options":          operation_setting.GetPaymentSetting().AmountOptions,
 		"discount":                operation_setting.GetPaymentSetting().AmountDiscount,
+		"topup_group_ratio":       topupGroupRatio,
 		"topup_link":              common.TopUpLink,
 	}
 	common.ApiSuccess(c, data)
@@ -155,11 +157,7 @@ func getPayMoney(amount int64, group string) float64 {
 		dAmount = dAmount.Div(dQuotaPerUnit)
 	}
 
-	topupGroupRatio := common.GetTopupGroupRatio(group)
-	if topupGroupRatio == 0 {
-		topupGroupRatio = 1
-	}
-
+	topupGroupRatio := normalizedTopupGroupRatio(group)
 	dTopupGroupRatio := decimal.NewFromFloat(topupGroupRatio)
 	dPrice := decimal.NewFromFloat(operation_setting.Price)
 	// apply optional preset discount by the original request amount (if configured), default 1.0
@@ -174,6 +172,14 @@ func getPayMoney(amount int64, group string) float64 {
 	payMoney := dAmount.Mul(dPrice).Mul(dTopupGroupRatio).Mul(dDiscount)
 
 	return payMoney.InexactFloat64()
+}
+
+func normalizedTopupGroupRatio(group string) float64 {
+	topupGroupRatio := common.GetTopupGroupRatio(group)
+	if topupGroupRatio <= 0 {
+		return 1
+	}
+	return topupGroupRatio
 }
 
 func getMinTopup() int64 {

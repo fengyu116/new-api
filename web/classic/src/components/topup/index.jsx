@@ -885,7 +885,9 @@ const TopUp = () => {
 
     // 计算实际支付金额，考虑折扣
     const discount = preset.discount || topupInfo.discount[preset.value] || 1.0;
-    const discountedAmount = preset.value * priceRatio * discount;
+    const topupGroupRatio = Number(topupInfo?.topup_group_ratio) || 1.0;
+    const discountedAmount =
+      preset.value * priceRatio * topupGroupRatio * discount;
     setAmount(discountedAmount);
   };
 
