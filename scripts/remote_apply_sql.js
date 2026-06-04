@@ -2,6 +2,7 @@
 /* Apply a generated SQL file to a remote new-api postgres container via SSH. */
 
 const fs = require('fs');
+const net = require('net');
 const path = require('path');
 const { createRequire } = require('module');
 
@@ -62,6 +63,11 @@ async function main() {
 
   const sql = fs.readFileSync(sqlPath);
   const { Client } = loadSsh2(args['ssh2-module-dir']);
+  const connectOptions = { host, port, username, password, readyTimeout: 20000 };
+  if (args.proxy) {
+    connectOptions.sock = await openProxySocket(args.proxy, host, port);
+    delete connectOptions.host;
+  }
   const cdProject = `cd '${remoteProject.replace(/'/g, `'\\''`)}'`;
   const backupCommand = [
     cdProject,
@@ -122,7 +128,42 @@ async function main() {
         }
       })
       .on('error', reject)
-      .connect({ host, port, username, password, readyTimeout: 20000 });
+      .connect(connectOptions);
+  });
+}
+
+function openProxySocket(proxy, targetHost, targetPort) {
+  const url = new URL(proxy);
+  if (url.protocol !== 'http:') {
+    throw new Error(`Unsupported proxy protocol: ${url.protocol}`);
+  }
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(Number(url.port || 80), url.hostname);
+    let buffer = '';
+    socket.setTimeout(20000);
+    socket.on('connect', () => {
+      socket.write(`CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\nHost: ${targetHost}:${targetPort}\r\n\r\n`);
+    });
+    socket.on('data', function onData(chunk) {
+      buffer += chunk.toString('binary');
+      const idx = buffer.indexOf('\r\n\r\n');
+      if (idx === -1) return;
+      socket.off('data', onData);
+      const header = buffer.slice(0, idx);
+      if (!/^HTTP\/\d\.\d 200\b/.test(header)) {
+        socket.destroy();
+        reject(new Error(`Proxy CONNECT failed: ${header.split('\r\n')[0]}`));
+        return;
+      }
+      const rest = Buffer.from(buffer.slice(idx + 4), 'binary');
+      if (rest.length > 0) socket.unshift(rest);
+      resolve(socket);
+    });
+    socket.on('timeout', () => {
+      socket.destroy();
+      reject(new Error('Proxy CONNECT timeout'));
+    });
+    socket.on('error', reject);
   });
 }
 
