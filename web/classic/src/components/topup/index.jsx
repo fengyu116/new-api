@@ -39,6 +39,7 @@ import InvitationCard from './InvitationCard';
 import TransferModal from './modals/TransferModal';
 import PaymentConfirmModal from './modals/PaymentConfirmModal';
 import TopupHistoryModal from './modals/TopupHistoryModal';
+import { normalizeTopupInfo } from './topupInfo';
 
 // Reject non-navigable schemes (e.g. javascript:, data:) and relative URLs.
 // Only http / https are allowed for backend-provided redirect targets.
@@ -598,10 +599,7 @@ const TopUp = () => {
       const res = await API.get('/api/user/topup/info');
       const { message, data, success } = res.data;
       if (success) {
-        setTopupInfo({
-          amount_options: data.amount_options || [],
-          discount: data.discount || {},
-        });
+        setTopupInfo(normalizeTopupInfo(data));
 
         // 处理支付方式
         let payMethods = data.pay_methods || [];
