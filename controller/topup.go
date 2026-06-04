@@ -23,7 +23,13 @@ import (
 
 func GetTopUpInfo(c *gin.Context) {
 	complianceConfirmed := operation_setting.IsPaymentComplianceConfirmed()
-	topupGroupRatio := normalizedTopupGroupRatio(c.GetString("group"))
+	group := c.GetString("group")
+	if userID := c.GetInt("id"); userID > 0 {
+		if currentGroup, err := model.GetUserGroup(userID, true); err == nil {
+			group = currentGroup
+		}
+	}
+	topupGroupRatio := normalizedTopupGroupRatio(group)
 
 	// 获取支付方式
 	payMethods := operation_setting.PayMethods
