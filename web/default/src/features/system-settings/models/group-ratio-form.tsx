@@ -189,7 +189,7 @@ export const GroupRatioForm = memo(function GroupRatioForm({
                   </FormControl>
                   <FormDescription>
                     {t(
-                      'JSON map of group → ratio applied when the user selects the group explicitly.'
+                      'Token/model routing group multipliers. These groups control channel access and API key routing, not user account tiers.'
                     )}
                   </FormDescription>
                   <FormMessage />
@@ -208,7 +208,7 @@ export const GroupRatioForm = memo(function GroupRatioForm({
                   </FormControl>
                   <FormDescription>
                     {t(
-                      'Optional multiplier per user group used when calculating recharge pricing. Provide a JSON object such as'
+                      'User account group multipliers used by recharge pricing and the admin user editor. Provide a JSON object such as'
                     )}
                     {` { "default": 1, "vip": 1.2 }`}.
                   </FormDescription>
@@ -228,7 +228,7 @@ export const GroupRatioForm = memo(function GroupRatioForm({
                   </FormControl>
                   <FormDescription>
                     {t(
-                      'JSON map of group → description exposed when users create API keys.'
+                      'Token groups users can select when creating API keys. This does not define user account groups.'
                     )}
                   </FormDescription>
                   <FormMessage />
@@ -268,7 +268,7 @@ export const GroupRatioForm = memo(function GroupRatioForm({
                   </FormControl>
                   <FormDescription>
                     {t(
-                      'JSON array of group identifiers. When enabled below, new tokens rotate through this list.'
+                      'Ordered token routing groups used by the virtual auto group. auto is not a real user account group.'
                     )}
                   </FormDescription>
                   <FormMessage />

@@ -972,11 +972,13 @@ export const renderGroupOption = (item) => {
       >
         <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
           <Typography.Text strong type={disabled ? 'tertiary' : undefined}>
-            {value}
+            {value || label}
           </Typography.Text>
-          <Typography.Text type='secondary' size='small'>
-            {label}
-          </Typography.Text>
+          {value && (
+            <Typography.Text type='secondary' size='small'>
+              {label}
+            </Typography.Text>
+          )}
         </div>
         {item.ratio && renderRatio(item.ratio)}
       </div>

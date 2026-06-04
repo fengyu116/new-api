@@ -142,10 +142,22 @@ export async function resetUserTwoFA(id: number): Promise<ApiResponse> {
 }
 
 /**
- * Get all available groups
+ * Get token/channel routing groups.
  */
 export async function getGroups(): Promise<ApiResponse<string[]>> {
   const res = await api.get('/api/group/')
+  return res.data
+}
+
+/**
+ * Get user account groups used by the admin user editor.
+ */
+export async function getUserAccountGroups(
+  currentGroup?: string
+): Promise<ApiResponse<string[]>> {
+  const res = await api.get('/api/group/user-account', {
+    params: currentGroup ? { current_group: currentGroup } : undefined,
+  })
   return res.data
 }
 

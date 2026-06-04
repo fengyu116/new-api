@@ -2,7 +2,9 @@ package controller
 
 import (
 	"net/http"
+	"sort"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
@@ -16,6 +18,27 @@ func GetGroups(c *gin.Context) {
 	for groupName := range ratio_setting.GetGroupRatioCopy() {
 		groupNames = append(groupNames, groupName)
 	}
+	sort.Strings(groupNames)
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    groupNames,
+	})
+}
+
+func GetUserAccountGroups(c *gin.Context) {
+	groupSet := make(map[string]struct{})
+	for groupName := range common.GetTopupGroupRatioCopy() {
+		groupSet[groupName] = struct{}{}
+	}
+	if currentGroup := c.Query("current_group"); currentGroup != "" {
+		groupSet[currentGroup] = struct{}{}
+	}
+	groupNames := make([]string, 0, len(groupSet))
+	for groupName := range groupSet {
+		groupNames = append(groupNames, groupName)
+	}
+	sort.Strings(groupNames)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -38,10 +61,10 @@ func GetUserGroups(c *gin.Context) {
 			}
 		}
 	}
-	if _, ok := userUsableGroups["auto"]; ok {
+	if len(setting.GetAutoGroups()) > 0 {
 		usableGroups["auto"] = map[string]interface{}{
 			"ratio": "自动",
-			"desc":  setting.GetUsableGroupDescription("auto"),
+			"desc":  "按自动分组链路选择可用渠道，实际扣费按命中的分组倍率计算",
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{

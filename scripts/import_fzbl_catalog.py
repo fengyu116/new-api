@@ -14,6 +14,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -1696,6 +1698,189 @@ def apply_sql_remote(
         subprocess.run(cmd, stdin=handle, check=True)
 
 
+def apply_sqlite_catalog(
+    db_path: Path,
+    vendors: list[dict[str, Any]],
+    models: list[CatalogModel],
+    cleanup_virtuals: list[CatalogModel],
+    channels: list[dict[str, Any]],
+    option_maps: dict[str, dict[str, Any]],
+    fzbl: dict[str, Any],
+) -> Path:
+    if not db_path.exists():
+        raise FileNotFoundError(f"SQLite database not found: {db_path}")
+
+    backup_path = db_path.with_name(f"{db_path.name}.before-fzbl-{time.strftime('%Y%m%d-%H%M%S')}.bak")
+    shutil.copy2(db_path, backup_path)
+    now = int(time.time())
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("BEGIN")
+
+        channel_ids = [
+            row[0]
+            for row in conn.execute(
+                "SELECT id FROM channels WHERE tag LIKE 'fzbl-sync%' OR tag LIKE 'fzbl-special%'"
+            )
+        ]
+        if channel_ids:
+            placeholders = ",".join("?" for _ in channel_ids)
+            conn.execute(f"DELETE FROM abilities WHERE channel_id IN ({placeholders})", channel_ids)
+            conn.execute(f"DELETE FROM channels WHERE id IN ({placeholders})", channel_ids)
+
+        cleanup_names = unique_ordered([model.name for model in cleanup_virtuals])
+        if cleanup_names:
+            placeholders = ",".join("?" for _ in cleanup_names)
+            conn.execute(
+                f"UPDATE models SET status=0, updated_time=? WHERE model_name IN ({placeholders})",
+                [now, *cleanup_names],
+            )
+
+        for vendor in vendors:
+            vendor_id = int(vendor.get("id") or 0)
+            if vendor_id <= 0:
+                continue
+            conn.execute(
+                """
+                INSERT INTO vendors (id,name,description,icon,status,created_time,updated_time)
+                VALUES (?,?,?,?,1,?,?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name,
+                    description=excluded.description,
+                    icon=excluded.icon,
+                    status=1,
+                    updated_time=excluded.updated_time
+                """,
+                (
+                    vendor_id,
+                    vendor.get("name") or "",
+                    vendor.get("description") or "",
+                    vendor.get("icon") or "",
+                    now,
+                    now,
+                ),
+            )
+
+        for model in models:
+            existing = conn.execute(
+                "SELECT id FROM models WHERE model_name=? AND deleted_at IS NULL LIMIT 1",
+                (model.name,),
+            ).fetchone()
+            values = (
+                model.description,
+                "",
+                model.tags,
+                model.vendor_id,
+                json.dumps(model.endpoint_map, ensure_ascii=False, separators=(",", ":")),
+                1,
+                0,
+                now,
+                0,
+            )
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE models SET description=?,icon=?,tags=?,vendor_id=?,endpoints=?,
+                        status=?,sync_official=?,updated_time=?,name_rule=?
+                    WHERE id=?
+                    """,
+                    (*values, existing[0]),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO models
+                        (model_name,description,icon,tags,vendor_id,endpoints,status,sync_official,created_time,updated_time,name_rule)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        model.name,
+                        model.description,
+                        "",
+                        model.tags,
+                        model.vendor_id,
+                        json.dumps(model.endpoint_map, ensure_ascii=False, separators=(",", ":")),
+                        1,
+                        0,
+                        now,
+                        now,
+                        0,
+                    ),
+                )
+
+        for channel in channels:
+            cursor = conn.execute(
+                """
+                INSERT INTO channels
+                    (type,key,status,name,base_url,models,"group",model_mapping,priority,weight,tag,param_override,created_time)
+                VALUES (?,?,1,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    channel["type"],
+                    channel["key"],
+                    channel["name"],
+                    channel["base_url"],
+                    channel["models"],
+                    channel["group"],
+                    channel["model_mapping"],
+                    channel["priority"],
+                    channel["weight"],
+                    channel["tag"],
+                    channel["param_override"],
+                    now,
+                ),
+            )
+            channel_id = cursor.lastrowid
+            for group in unique_ordered(channel["group"].split(",")):
+                for model_name in unique_ordered(channel["models"].split(",")):
+                    conn.execute(
+                        """
+                        INSERT INTO abilities ("group",model,channel_id,enabled,priority,weight,tag)
+                        VALUES (?,?,?,1,?,?,?)
+                        ON CONFLICT("group",model,channel_id) DO UPDATE SET
+                            enabled=1,
+                            priority=excluded.priority,
+                            weight=excluded.weight,
+                            tag=excluded.tag
+                        """,
+                        (
+                            group,
+                            model_name,
+                            channel_id,
+                            channel["priority"],
+                            channel["weight"],
+                            channel["tag"],
+                        ),
+                    )
+
+        local_option_maps: dict[str, Any] = dict(option_maps)
+        local_option_maps["UserUsableGroups"] = fzbl.get("usable_group") or {}
+        local_option_maps["AutoGroups"] = fzbl.get("auto_groups") or []
+        for key, incoming in local_option_maps.items():
+            existing_row = conn.execute("SELECT value FROM options WHERE key=?", (key,)).fetchone()
+            existing: Any = {}
+            if existing_row and existing_row[0]:
+                try:
+                    existing = json.loads(existing_row[0])
+                except json.JSONDecodeError:
+                    existing = {}
+            if isinstance(existing, dict) and isinstance(incoming, dict):
+                merged = {**existing, **incoming}
+            else:
+                merged = incoming
+            conn.execute(
+                """
+                INSERT INTO options (key,value) VALUES (?,?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                """,
+                (key, json.dumps(merged, ensure_ascii=False, separators=(",", ":"))),
+            )
+
+        conn.commit()
+    return backup_path
+
+
 def sh_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
@@ -1718,6 +1903,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--key", default=os.environ.get("FZBL_UPSTREAM_KEY", ""), help="Upstream API key, or FZBL_UPSTREAM_KEY")
     parser.add_argument("--out-dir", default="tmp/fzbl-import")
     parser.add_argument("--apply", action="store_true", help="Apply generated SQL through docker compose exec")
+    parser.add_argument(
+        "--apply-sqlite",
+        default="",
+        metavar="DB_PATH",
+        help="Apply the normalized catalog to a local SQLite database after creating a backup",
+    )
     parser.add_argument("--compose-project", default=".")
     parser.add_argument("--remote", default="", help="SSH target such as root@154.12.60.218")
     parser.add_argument("--remote-project", default="/opt/new-api", help="Remote compose project path")
@@ -1741,6 +1932,9 @@ def main() -> int:
     if args.apply and not args.key:
         print("missing --key or FZBL_UPSTREAM_KEY for --apply", file=sys.stderr)
         return 2
+    if args.apply and args.apply_sqlite:
+        print("--apply and --apply-sqlite cannot be used together", file=sys.stderr)
+        return 2
     if args.remote and not args.apply:
         print("--remote requires --apply", file=sys.stderr)
         return 2
@@ -1759,7 +1953,7 @@ def main() -> int:
     fzbl_cank_special_without_billing = sorted(
         name for name in fzbl_cank_special_models if not (special_models.get(name) or {}).get("billing_enabled")
     )
-    key_for_sql = args.key or "__DRY_RUN_KEY__"
+    key_for_sql = args.key or ("__LOCAL_FZBL_KEY__" if args.apply_sqlite else "__DRY_RUN_KEY__")
     channels = build_channels(models, key_for_sql, args.base_url)
     sql = build_sql(fzbl.get("vendors") or [], models, cleanup_virtuals, channels, option_maps)
 
@@ -1807,7 +2001,18 @@ def main() -> int:
     print(f"sql: {sql_path}")
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
-    if args.apply:
+    if args.apply_sqlite:
+        backup_path = apply_sqlite_catalog(
+            Path(args.apply_sqlite),
+            fzbl.get("vendors") or [],
+            models,
+            cleanup_virtuals,
+            channels,
+            option_maps,
+            fzbl,
+        )
+        print(f"local SQLite apply complete; backup: {backup_path}")
+    elif args.apply:
         if args.remote:
             apply_sql_remote(
                 sql_path,

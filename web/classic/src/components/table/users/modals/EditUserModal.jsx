@@ -96,9 +96,12 @@ const EditUserModal = (props) => {
     remark: '',
   });
 
-  const fetchGroups = async () => {
+  const fetchGroups = async (currentGroup = '') => {
     try {
-      let res = await API.get(`/api/group/`);
+      const query = currentGroup
+        ? `?current_group=${encodeURIComponent(currentGroup)}`
+        : '';
+      let res = await API.get(`/api/group/user-account${query}`);
       setGroupOptions(res.data.data.map((g) => ({ label: g, value: g })));
     } catch (e) {
       showError(e.message);
@@ -118,6 +121,7 @@ const EditUserModal = (props) => {
         quotaToDisplayAmount(data.quota || 0).toFixed(6),
       );
       setInputs({ ...getInitValues(), ...data });
+      if (userId) fetchGroups(data.group);
     } else {
       showError(message);
     }
@@ -132,7 +136,6 @@ const EditUserModal = (props) => {
 
   useEffect(() => {
     loadUser();
-    if (userId) fetchGroups();
     setBindingModalVisible(false);
   }, [props.editingUser.id]);
 
