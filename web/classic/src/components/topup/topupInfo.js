@@ -5,3 +5,10 @@ export function normalizeTopupInfo(data) {
     topup_group_ratio: Number(data.topup_group_ratio) || 1.0,
   };
 }
+
+export function calculateEffectiveTopupDiscount(
+  presetDiscount,
+  topupGroupRatio,
+) {
+  return presetDiscount * topupGroupRatio;
+}

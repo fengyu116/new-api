@@ -50,6 +50,7 @@ import { useMinimumLoadingTime } from '../../hooks/common/useMinimumLoadingTime'
 import { useActualTheme } from '../../context/Theme';
 import { getCurrencyConfig } from '../../helpers/render';
 import SubscriptionPlansCard from './SubscriptionPlansCard';
+import { calculateEffectiveTopupDiscount } from './topupInfo';
 
 const { Text } = Typography;
 
@@ -443,9 +444,14 @@ const RechargeCard = ({
                         1.0;
                       const topupGroupRatio =
                         Number(topupInfo?.topup_group_ratio) || 1.0;
+                      const effectiveDiscount =
+                        calculateEffectiveTopupDiscount(
+                          discount,
+                          topupGroupRatio,
+                        );
                       const originalPrice = preset.value * priceRatio;
                       const discountedPrice =
-                        originalPrice * topupGroupRatio * discount;
+                        originalPrice * effectiveDiscount;
                       const hasDiscount = discountedPrice < originalPrice;
                       const actualPay = discountedPrice;
                       const save = Math.max(0, originalPrice - discountedPrice);
@@ -511,10 +517,10 @@ const RechargeCard = ({
                                 <Tag style={{ marginLeft: 4 }} color='green'>
                                   {t('折').includes('off')
                                     ? (
-                                        (1 - parseFloat(discount)) *
+                                        (1 - effectiveDiscount) *
                                         100
                                       ).toFixed(1)
-                                    : (discount * 10).toFixed(1)}
+                                    : (effectiveDiscount * 10).toFixed(1)}
                                   {t('折')}
                                 </Tag>
                               )}

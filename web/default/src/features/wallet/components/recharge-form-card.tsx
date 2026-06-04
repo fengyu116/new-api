@@ -222,6 +222,8 @@ export function RechargeFormCard({
                         preset.discount ||
                         topupInfo?.discount?.[preset.value] ||
                         1.0
+                      const effectiveDiscount =
+                        discount * (topupInfo?.topup_group_ratio || 1)
                       const {
                         displayValue,
                         actualPrice,
@@ -252,7 +254,7 @@ export function RechargeFormCard({
                             </div>
                             {hasDiscount && (
                               <div className='text-xs font-medium text-green-600'>
-                                {getDiscountLabel(discount)}
+                                {getDiscountLabel(effectiveDiscount)}
                               </div>
                             )}
                           </div>
