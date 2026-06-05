@@ -382,8 +382,7 @@ func TokenAuth() func(c *gin.Context) {
 		userGroup := userCache.Group
 		tokenGroup := token.Group
 		if tokenGroup != "" {
-			// check common.UserUsableGroups[userGroup]
-			if _, ok := service.GetUserUsableGroups(userGroup)[tokenGroup]; !ok {
+			if !canUseTokenGroup(userGroup, tokenGroup) {
 				abortWithOpenAiMessage(c, http.StatusForbidden, fmt.Sprintf("无权访问 %s 分组", tokenGroup))
 				return
 			}
@@ -404,6 +403,14 @@ func TokenAuth() func(c *gin.Context) {
 		}
 		c.Next()
 	}
+}
+
+func canUseTokenGroup(userGroup, tokenGroup string) bool {
+	if tokenGroup == "auto" {
+		return len(service.GetUserAutoGroup(userGroup)) > 0
+	}
+	_, ok := service.GetUserUsableGroups(userGroup)[tokenGroup]
+	return ok
 }
 
 func SetupContextForToken(c *gin.Context, token *model.Token, parts ...string) error {
