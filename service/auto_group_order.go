@@ -57,6 +57,18 @@ func ResolveAutoGroupOrderFromContext(c *gin.Context, userGroup string) []string
 	return ResolveAutoGroupOrder(userGroup, tokenOrder)
 }
 
+// NormalizeTokenAutoGroups 校验并规范化令牌保存时的自定义 auto 分组配置。
+// 令牌分组不是 auto 时强制清空；校验失败返回错误。
+func NormalizeTokenAutoGroups(userGroup, tokenGroup, rawJSON string) (string, error) {
+	if tokenGroup != "auto" || rawJSON == "" {
+		return "", nil
+	}
+	if err := ValidateTokenAutoGroups(userGroup, rawJSON); err != nil {
+		return "", err
+	}
+	return rawJSON, nil
+}
+
 // ValidateTokenAutoGroups 校验令牌保存时提交的自定义 auto 分组顺序（JSON 数组字符串）。
 // 空串视为未配置，直接通过。
 func ValidateTokenAutoGroups(userGroup string, rawJSON string) error {

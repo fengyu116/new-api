@@ -137,6 +137,34 @@ func TestValidateTokenAutoGroups(t *testing.T) {
 	require.Error(t, ValidateTokenAutoGroups("default", `["`+strings.Join(manyItems, `","`)+`"]`))
 }
 
+func TestNormalizeTokenAutoGroups(t *testing.T) {
+	setupAutoGroupOrderTest(t,
+		`["g-b","g-a"]`,
+		`{"default":"默认","g-a":"A","g-b":"B"}`,
+		`{"default":1,"g-a":2,"g-b":1}`,
+		`{}`,
+		setting.AutoGroupStrategyOrder)
+
+	// 非 auto 分组强制清空
+	normalized, err := NormalizeTokenAutoGroups("default", "g-a", `["g-b"]`)
+	require.NoError(t, err)
+	require.Empty(t, normalized)
+
+	// auto 分组合法配置原样保留
+	normalized, err = NormalizeTokenAutoGroups("default", "auto", `["g-b"]`)
+	require.NoError(t, err)
+	require.Equal(t, `["g-b"]`, normalized)
+
+	// auto 分组空配置通过
+	normalized, err = NormalizeTokenAutoGroups("default", "auto", "")
+	require.NoError(t, err)
+	require.Empty(t, normalized)
+
+	// auto 分组非法配置报错
+	_, err = NormalizeTokenAutoGroups("default", "auto", `["not-exist"]`)
+	require.Error(t, err)
+}
+
 func TestResolveAutoGroupOrderDoesNotMutateBaseOrderAcrossCalls(t *testing.T) {
 	setupAutoGroupOrderTest(t,
 		`["g-b","g-a"]`,

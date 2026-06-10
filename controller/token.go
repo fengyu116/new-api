@@ -9,6 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
@@ -201,6 +202,12 @@ func AddToken(c *gin.Context) {
 		})
 		return
 	}
+	userGroup, _ := model.GetUserGroup(c.GetInt("id"), false)
+	token.AutoGroups, err = service.NormalizeTokenAutoGroups(userGroup, token.Group, token.AutoGroups)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	key, err := common.GenerateKey()
 	if err != nil {
 		common.ApiErrorI18n(c, i18n.MsgTokenGenerateFailed)
@@ -221,6 +228,7 @@ func AddToken(c *gin.Context) {
 		AllowIps:           token.AllowIps,
 		Group:              token.Group,
 		CrossGroupRetry:    token.CrossGroupRetry,
+		AutoGroups:         token.AutoGroups,
 	}
 	err = cleanToken.Insert()
 	if err != nil {
@@ -289,6 +297,12 @@ func UpdateToken(c *gin.Context) {
 	if statusOnly != "" {
 		cleanToken.Status = token.Status
 	} else {
+		userGroup, _ := model.GetUserGroup(userId, false)
+		token.AutoGroups, err = service.NormalizeTokenAutoGroups(userGroup, token.Group, token.AutoGroups)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
 		// If you add more fields, please also update token.Update()
 		cleanToken.Name = token.Name
 		cleanToken.ExpiredTime = token.ExpiredTime
@@ -299,6 +313,7 @@ func UpdateToken(c *gin.Context) {
 		cleanToken.AllowIps = token.AllowIps
 		cleanToken.Group = token.Group
 		cleanToken.CrossGroupRetry = token.CrossGroupRetry
+		cleanToken.AutoGroups = token.AutoGroups
 	}
 	err = cleanToken.Update()
 	if err != nil {
