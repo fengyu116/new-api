@@ -79,6 +79,7 @@ import {
   ApiKeyGroupCombobox,
   type ApiKeyGroupOption,
 } from './api-key-group-combobox'
+import { AutoGroupOrderField } from './auto-group-order-field'
 import { useApiKeys } from './api-keys-provider'
 
 type ApiKeyMutateDrawerProps = {
@@ -130,6 +131,7 @@ export function ApiKeysMutateDrawer({
     })),
   ]
   const backendHasAuto = groups.some((g) => g.value === 'auto')
+  const autoGroupCandidates = groupsData?.auto_groups || []
   const schema = getApiKeyFormSchema(t)
 
   const form = useForm<ApiKeyFormValues>({
@@ -341,6 +343,31 @@ export function ApiKeysMutateDrawer({
                           onCheckedChange={field.onChange}
                         />
                       </FormControl>
+                    </FormItem>
+                  )}
+                />
+              )}
+
+              {selectedGroup === 'auto' && autoGroupCandidates.length > 0 && (
+                <FormField
+                  control={form.control}
+                  name='auto_groups'
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>{t('Custom auto group order')}</FormLabel>
+                      <FormControl>
+                        <AutoGroupOrderField
+                          candidates={autoGroupCandidates}
+                          value={field.value || []}
+                          onChange={field.onChange}
+                        />
+                      </FormControl>
+                      <FormDescription>
+                        {t(
+                          'Auto routing tries groups in this order. Leave empty to use the global strategy.'
+                        )}
+                      </FormDescription>
+                      <FormMessage />
                     </FormItem>
                   )}
                 />

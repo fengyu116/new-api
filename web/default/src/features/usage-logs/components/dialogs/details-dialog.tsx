@@ -553,7 +553,11 @@ export function DetailsDialog(props: DetailsDialogProps) {
             {(props.log.group || other?.group) && (
               <DetailRow
                 label={t('Group')}
-                value={props.log.group || other?.group || ''}
+                value={
+                  other?.auto_route
+                    ? `auto → ${props.log.group || other?.group || ''}`
+                    : props.log.group || other?.group || ''
+                }
                 mono
               />
             )}

@@ -37,6 +37,7 @@ export function getApiKeyFormSchema(t: TFunction) {
       allow_ips: z.string().optional(),
       group: z.string().optional(),
       cross_group_retry: z.boolean().optional(),
+      auto_groups: z.array(z.string()).optional(),
       tokenCount: z.number().min(1).optional(),
     })
     .superRefine((data, ctx) => {
@@ -72,6 +73,7 @@ export const API_KEY_FORM_DEFAULT_VALUES: ApiKeyFormValues = {
   allow_ips: '',
   group: DEFAULT_GROUP,
   cross_group_retry: true,
+  auto_groups: [],
   tokenCount: 1,
 }
 
@@ -109,7 +111,24 @@ export function transformFormDataToPayload(
     allow_ips: data.allow_ips || '',
     group: data.group || '',
     cross_group_retry: data.group === 'auto' ? !!data.cross_group_retry : false,
+    auto_groups:
+      data.group === 'auto' && data.auto_groups && data.auto_groups.length > 0
+        ? JSON.stringify(data.auto_groups)
+        : '',
   }
+}
+
+function parseAutoGroups(raw: string | null | undefined): string[] {
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed)) {
+      return parsed.filter((g): g is string => typeof g === 'string')
+    }
+  } catch {
+    // ignore malformed value, treat as unset
+  }
+  return []
 }
 
 /**
@@ -134,6 +153,7 @@ export function transformApiKeyToFormDefaults(
     allow_ips: apiKey.allow_ips || '',
     group: apiKey.group || DEFAULT_GROUP,
     cross_group_retry: !!apiKey.cross_group_retry,
+    auto_groups: parseAutoGroups(apiKey.auto_groups),
     tokenCount: 1,
   }
 }

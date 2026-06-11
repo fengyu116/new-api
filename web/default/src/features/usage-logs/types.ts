@@ -128,6 +128,9 @@ export interface LogOtherData {
   model_price?: number
   group_ratio?: number
   user_group_ratio?: number
+  // Set by backend when the request was routed via the virtual auto group;
+  // log.group then holds the actually hit group.
+  auto_route?: boolean
   cache_ratio?: number
   cache_creation_ratio?: number
   cache_creation_ratio_5m?: number

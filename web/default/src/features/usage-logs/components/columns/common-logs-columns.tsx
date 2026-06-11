@@ -486,7 +486,8 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
       const metaParts: string[] = []
       const groupRatioText = getGroupRatioText(other)
       if (group) {
-        metaParts.push(sensitiveVisible ? group : '••••')
+        const groupText = sensitiveVisible ? group : '••••'
+        metaParts.push(other?.auto_route ? `auto → ${groupText}` : groupText)
       }
       if (groupRatioText) metaParts.push(groupRatioText)
 

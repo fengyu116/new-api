@@ -37,6 +37,13 @@ import {
   FormMessage,
 } from '@/components/ui/form'
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
   Sheet,
   SheetContent,
   SheetDescription,
@@ -65,8 +72,47 @@ type GroupFormValues = {
   UserUsableGroups: string
   GroupGroupRatio: string
   AutoGroups: string
+  AutoGroupStrategy: string
   DefaultUseAutoGroup: boolean
   GroupSpecialUsableGroup: string
+}
+
+function AutoGroupStrategyField({
+  form,
+}: {
+  form: UseFormReturn<GroupFormValues>
+}) {
+  const { t } = useTranslation()
+  return (
+    <FormField
+      control={form.control}
+      name='AutoGroupStrategy'
+      render={({ field }) => (
+        <FormItem>
+          <FormLabel>{t('Auto group selection strategy')}</FormLabel>
+          <Select value={field.value || 'order'} onValueChange={field.onChange}>
+            <FormControl>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+            </FormControl>
+            <SelectContent>
+              <SelectItem value='order'>{t('By configured order')}</SelectItem>
+              <SelectItem value='cheapest'>
+                {t('Cheapest effective ratio first')}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+          <FormDescription>
+            {t(
+              'How auto routing orders candidate groups. Per-token custom order always takes precedence.'
+            )}
+          </FormDescription>
+          <FormMessage />
+        </FormItem>
+      )}
+    />
+  )
 }
 
 type GroupRatioFormProps = {
@@ -152,6 +198,8 @@ export const GroupRatioForm = memo(function GroupRatioForm({
                 handleFieldChange('GroupSpecialUsableGroup', value)
               }
             />
+
+            <AutoGroupStrategyField form={form} />
 
             <FormField
               control={form.control}
@@ -294,6 +342,8 @@ export const GroupRatioForm = memo(function GroupRatioForm({
                 </FormItem>
               )}
             />
+
+            <AutoGroupStrategyField form={form} />
 
             <FormField
               control={form.control}
