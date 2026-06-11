@@ -382,7 +382,7 @@ func TokenAuth() func(c *gin.Context) {
 		userGroup := userCache.Group
 		tokenGroup := token.Group
 		if tokenGroup != "" {
-			if !canUseTokenGroup(userGroup, tokenGroup) {
+			if !canUseTokenGroup(userGroup, tokenGroup, token.GetAutoGroups()) {
 				abortWithOpenAiMessage(c, http.StatusForbidden, fmt.Sprintf("无权访问 %s 分组", tokenGroup))
 				return
 			}
@@ -405,9 +405,10 @@ func TokenAuth() func(c *gin.Context) {
 	}
 }
 
-func canUseTokenGroup(userGroup, tokenGroup string) bool {
+func canUseTokenGroup(userGroup, tokenGroup string, tokenAutoGroups []string) bool {
 	if tokenGroup == "auto" {
-		return len(service.GetUserAutoGroup(userGroup)) > 0
+		// 令牌自带优先级列表或站点 auto 链路任一可解析出候选即放行
+		return len(service.ResolveAutoGroupOrder(userGroup, tokenAutoGroups, "")) > 0
 	}
 	_, ok := service.GetUserUsableGroups(userGroup)[tokenGroup]
 	return ok
@@ -434,6 +435,7 @@ func SetupContextForToken(c *gin.Context, token *model.Token, parts ...string) e
 	common.SetContextKey(c, constant.ContextKeyTokenGroup, token.Group)
 	common.SetContextKey(c, constant.ContextKeyTokenCrossGroupRetry, token.CrossGroupRetry)
 	common.SetContextKey(c, constant.ContextKeyTokenAutoGroups, token.GetAutoGroups())
+	common.SetContextKey(c, constant.ContextKeyTokenAutoGroupStrategy, token.AutoGroupStrategy)
 	if len(parts) > 1 {
 		if model.IsAdmin(token.UserId) {
 			c.Set("specific_channel_id", parts[1])

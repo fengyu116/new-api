@@ -29,6 +29,7 @@ type Token struct {
 	Group              string         `json:"group" gorm:"default:''"`
 	CrossGroupRetry    bool           `json:"cross_group_retry"` // 跨分组重试，仅auto分组有效
 	AutoGroups         string         `json:"auto_groups" gorm:"type:text"` // 自定义auto候选分组顺序(JSON数组)，仅auto分组有效
+	AutoGroupStrategy  string         `json:"auto_group_strategy" gorm:"type:varchar(16)"` // auto选组策略覆盖(order/cheapest)，空为跟随站点，仅auto分组有效
 	DeletedAt          gorm.DeletedAt `gorm:"index"`
 }
 
@@ -296,7 +297,7 @@ func (token *Token) Update() (err error) {
 		}
 	}()
 	err = DB.Model(token).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
-		"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry", "auto_groups").Updates(token).Error
+		"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry", "auto_groups", "auto_group_strategy").Updates(token).Error
 	return err
 }
 

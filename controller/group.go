@@ -68,9 +68,8 @@ func GetUserGroups(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"success":     true,
-		"message":     "",
-		"data":        usableGroups,
-		"auto_groups": service.GetUserAutoGroup(userGroup),
+		"success": true,
+		"message": "",
+		"data":    usableGroups,
 	})
 }

@@ -208,6 +208,11 @@ func AddToken(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	token.AutoGroupStrategy, err = service.NormalizeTokenAutoGroupStrategy(token.Group, token.AutoGroupStrategy)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	key, err := common.GenerateKey()
 	if err != nil {
 		common.ApiErrorI18n(c, i18n.MsgTokenGenerateFailed)
@@ -229,6 +234,7 @@ func AddToken(c *gin.Context) {
 		Group:              token.Group,
 		CrossGroupRetry:    token.CrossGroupRetry,
 		AutoGroups:         token.AutoGroups,
+		AutoGroupStrategy:  token.AutoGroupStrategy,
 	}
 	err = cleanToken.Insert()
 	if err != nil {
@@ -303,6 +309,11 @@ func UpdateToken(c *gin.Context) {
 			common.ApiError(c, err)
 			return
 		}
+		token.AutoGroupStrategy, err = service.NormalizeTokenAutoGroupStrategy(token.Group, token.AutoGroupStrategy)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
 		// If you add more fields, please also update token.Update()
 		cleanToken.Name = token.Name
 		cleanToken.ExpiredTime = token.ExpiredTime
@@ -314,6 +325,7 @@ func UpdateToken(c *gin.Context) {
 		cleanToken.Group = token.Group
 		cleanToken.CrossGroupRetry = token.CrossGroupRetry
 		cleanToken.AutoGroups = token.AutoGroups
+		cleanToken.AutoGroupStrategy = token.AutoGroupStrategy
 	}
 	err = cleanToken.Update()
 	if err != nil {
