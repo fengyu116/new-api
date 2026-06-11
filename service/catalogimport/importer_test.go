@@ -2,10 +2,15 @@ package catalogimport
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting/special_pricing"
+	"github.com/glebarez/sqlite"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 func TestParseVectorNormalCatalog(t *testing.T) {
@@ -170,5 +175,105 @@ func TestMergeSpecialPricingKeepsExistingModels(t *testing.T) {
 	}
 	if _, ok := parsed.Models["new-model"]; !ok {
 		t.Fatalf("incoming special pricing model was not added: %s", merged)
+	}
+}
+
+func setupCatalogImportTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/catalog-import-test.db"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Vendor{}, &model.Model{}); err != nil {
+		t.Fatalf("migrate sqlite: %v", err)
+	}
+	t.Cleanup(func() {
+		sqlDB, err := db.DB()
+		if err == nil {
+			_ = sqlDB.Close()
+		}
+	})
+	return db
+}
+
+func TestUpsertModelsUsesActualVendorID(t *testing.T) {
+	db := setupCatalogImportTestDB(t)
+	requireNoError := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	requireNoError(db.Create(&model.Vendor{
+		Id:          10,
+		Name:        "OpenAI",
+		Description: "old",
+		Status:      1,
+	}).Error)
+
+	catalog := &ProviderCatalog{
+		Vendors: []CatalogVendor{{
+			ID:          1,
+			Name:        "OpenAI",
+			Description: "new",
+			Icon:        "OpenAI.Color",
+		}},
+		Models: []CatalogModel{{
+			Name:        "gpt-test",
+			Description: "desc",
+			VendorID:    1,
+		}},
+	}
+
+	err := db.Transaction(func(tx *gorm.DB) error {
+		vendorIDMap, err := upsertVendorsTx(tx, catalog)
+		if err != nil {
+			return err
+		}
+		return upsertModelsTx(tx, catalog, vendorIDMap)
+	})
+	requireNoError(err)
+
+	var saved model.Model
+	requireNoError(db.Where("model_name = ?", "gpt-test").First(&saved).Error)
+	if saved.VendorID != 10 {
+		t.Fatalf("expected model vendor_id to use existing DB vendor id 10, got %d", saved.VendorID)
+	}
+}
+
+func TestPostgresVendorSequenceIsSyncedBeforeImport(t *testing.T) {
+	dsn := os.Getenv("TEST_POSTGRES_DSN")
+	if strings.TrimSpace(dsn) == "" {
+		t.Skip("set TEST_POSTGRES_DSN to run postgres sequence regression test")
+	}
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	requireNoError := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	requireNoError(db.Exec("DROP TABLE IF EXISTS models").Error)
+	requireNoError(db.Exec("DROP TABLE IF EXISTS vendors").Error)
+	requireNoError(db.AutoMigrate(&model.Vendor{}, &model.Model{}))
+	requireNoError(db.Create(&model.Vendor{Id: 100, Name: "Existing", Status: 1}).Error)
+	requireNoError(db.Exec("SELECT setval(pg_get_serial_sequence('vendors', 'id'), 1, false)").Error)
+
+	catalog := &ProviderCatalog{
+		Vendors: []CatalogVendor{{ID: 1, Name: "NewVendor"}},
+	}
+	err = db.Transaction(func(tx *gorm.DB) error {
+		_, err := upsertVendorsTx(tx, catalog)
+		return err
+	})
+	requireNoError(err)
+
+	var saved model.Vendor
+	requireNoError(db.Where("name = ?", "NewVendor").First(&saved).Error)
+	if saved.Id <= 100 {
+		t.Fatalf("expected synced sequence to allocate id > 100, got %d", saved.Id)
 	}
 }

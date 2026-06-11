@@ -2,6 +2,7 @@ package catalogimport
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -166,10 +167,11 @@ func applyCatalogTx(tx *gorm.DB, catalog *ProviderCatalog, plans []channelPlan) 
 			return err
 		}
 	}
-	if err := upsertVendorsTx(tx, catalog); err != nil {
+	vendorIDMap, err := upsertVendorsTx(tx, catalog)
+	if err != nil {
 		return err
 	}
-	if err := upsertModelsTx(tx, catalog); err != nil {
+	if err := upsertModelsTx(tx, catalog, vendorIDMap); err != nil {
 		return err
 	}
 	for _, plan := range plans {
@@ -183,22 +185,33 @@ func applyCatalogTx(tx *gorm.DB, catalog *ProviderCatalog, plans []channelPlan) 
 	return nil
 }
 
-func upsertVendorsTx(tx *gorm.DB, catalog *ProviderCatalog) error {
+func upsertVendorsTx(tx *gorm.DB, catalog *ProviderCatalog) (map[int]int, error) {
 	now := common.GetTimestamp()
+	vendorIDMap := make(map[int]int, len(catalog.Vendors))
+	if err := syncVendorIDSequenceTx(tx); err != nil {
+		return nil, err
+	}
 	for _, item := range catalog.Vendors {
 		if strings.TrimSpace(item.Name) == "" {
 			continue
 		}
 		var vendor model.Vendor
-		if err := tx.Where("name = ?", item.Name).FirstOrCreate(&vendor, model.Vendor{
-			Name:        item.Name,
-			Description: item.Description,
-			Icon:        item.Icon,
-			Status:      1,
-			CreatedTime: now,
-			UpdatedTime: now,
-		}).Error; err != nil {
-			return err
+		err := tx.Where("name = ?", item.Name).First(&vendor).Error
+		if err != nil {
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, err
+			}
+			vendor = model.Vendor{
+				Name:        item.Name,
+				Description: item.Description,
+				Icon:        item.Icon,
+				Status:      1,
+				CreatedTime: now,
+				UpdatedTime: now,
+			}
+			if err := tx.Create(&vendor).Error; err != nil {
+				return nil, err
+			}
 		}
 		if err := tx.Model(&vendor).Updates(map[string]any{
 			"description":  item.Description,
@@ -206,13 +219,29 @@ func upsertVendorsTx(tx *gorm.DB, catalog *ProviderCatalog) error {
 			"status":       1,
 			"updated_time": now,
 		}).Error; err != nil {
-			return err
+			return nil, err
+		}
+		if item.ID > 0 {
+			vendorIDMap[item.ID] = vendor.Id
 		}
 	}
-	return nil
+	return vendorIDMap, nil
 }
 
-func upsertModelsTx(tx *gorm.DB, catalog *ProviderCatalog) error {
+func syncVendorIDSequenceTx(tx *gorm.DB) error {
+	if tx == nil || tx.Dialector == nil || tx.Dialector.Name() != "postgres" {
+		return nil
+	}
+	return tx.Exec(`
+		SELECT setval(
+			pg_get_serial_sequence('vendors', 'id'),
+			GREATEST(COALESCE((SELECT MAX(id) FROM vendors), 0) + 1, 1),
+			false
+		)
+	`).Error
+}
+
+func upsertModelsTx(tx *gorm.DB, catalog *ProviderCatalog, vendorIDMap map[int]int) error {
 	now := common.GetTimestamp()
 	for _, item := range catalog.Models {
 		if strings.TrimSpace(item.Name) == "" {
@@ -222,12 +251,16 @@ func upsertModelsTx(tx *gorm.DB, catalog *ProviderCatalog) error {
 		if len(item.EndpointMap) > 0 {
 			endpoints = mustJSON(item.EndpointMap)
 		}
+		vendorID := item.VendorID
+		if mappedID, ok := vendorIDMap[item.VendorID]; ok {
+			vendorID = mappedID
+		}
 		var meta model.Model
 		create := model.Model{
 			ModelName:    item.Name,
 			Description:  item.Description,
 			Tags:         item.Tags,
-			VendorID:     item.VendorID,
+			VendorID:     vendorID,
 			Endpoints:    endpoints,
 			Status:       1,
 			SyncOfficial: 0,
@@ -240,7 +273,7 @@ func upsertModelsTx(tx *gorm.DB, catalog *ProviderCatalog) error {
 		if err := tx.Model(&meta).Updates(map[string]any{
 			"description":   item.Description,
 			"tags":          item.Tags,
-			"vendor_id":     item.VendorID,
+			"vendor_id":     vendorID,
 			"endpoints":     endpoints,
 			"status":        1,
 			"sync_official": 0,
