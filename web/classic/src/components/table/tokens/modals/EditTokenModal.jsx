@@ -56,6 +56,7 @@ import {
 } from '@douyinfe/semi-icons';
 import { useTranslation } from 'react-i18next';
 import { StatusContext } from '../../../../context/Status';
+import AutoGroupOrderList from './AutoGroupOrderList';
 
 const { Text, Title } = Typography;
 
@@ -67,6 +68,7 @@ const EditTokenModal = (props) => {
   const formApiRef = useRef(null);
   const [models, setModels] = useState([]);
   const [groups, setGroups] = useState([]);
+  const [autoGroupCandidates, setAutoGroupCandidates] = useState([]);
   const [showQuotaInput, setShowQuotaInput] = useState(false);
   const isEdit = props.editingToken.id !== undefined;
 
@@ -81,6 +83,7 @@ const EditTokenModal = (props) => {
     allow_ips: '',
     group: '',
     cross_group_retry: false,
+    auto_groups: [],
     tokenCount: 1,
   });
 
@@ -137,6 +140,7 @@ const EditTokenModal = (props) => {
     let res = await API.get(`/api/user/self/groups`);
     const { success, message, data } = res.data;
     if (success) {
+      setAutoGroupCandidates(res.data.auto_groups || []);
       let localGroupOptions = [
         {
           label: t('留空表示此令牌使用用户账号分组'),
@@ -175,6 +179,16 @@ const EditTokenModal = (props) => {
         data.model_limits = data.model_limits.split(',');
       } else {
         data.model_limits = [];
+      }
+      if (data.auto_groups && typeof data.auto_groups === 'string') {
+        try {
+          data.auto_groups = JSON.parse(data.auto_groups);
+        } catch {
+          data.auto_groups = [];
+        }
+      }
+      if (!Array.isArray(data.auto_groups)) {
+        data.auto_groups = [];
       }
       data.remain_amount = Number(
         quotaToDisplayAmount(data.remain_quota || 0).toFixed(6),
@@ -245,6 +259,12 @@ const EditTokenModal = (props) => {
       }
       localInputs.model_limits = localInputs.model_limits.join(',');
       localInputs.model_limits_enabled = localInputs.model_limits.length > 0;
+      localInputs.auto_groups =
+        localInputs.group === 'auto' &&
+        Array.isArray(localInputs.auto_groups) &&
+        localInputs.auto_groups.length > 0
+          ? JSON.stringify(localInputs.auto_groups)
+          : '';
       let res = await API.put(`/api/token/`, {
         ...localInputs,
         id: parseInt(props.editingToken.id),
@@ -289,6 +309,12 @@ const EditTokenModal = (props) => {
         }
         localInputs.model_limits = localInputs.model_limits.join(',');
         localInputs.model_limits_enabled = localInputs.model_limits.length > 0;
+        localInputs.auto_groups =
+          localInputs.group === 'auto' &&
+          Array.isArray(localInputs.auto_groups) &&
+          localInputs.auto_groups.length > 0
+            ? JSON.stringify(localInputs.auto_groups)
+            : '';
         let res = await API.post(`/api/token/`, localInputs);
         const { success, message } = res.data;
         if (success) {
@@ -432,6 +458,28 @@ const EditTokenModal = (props) => {
                       )}
                     />
                   </Col>
+                  {values.group === 'auto' && autoGroupCandidates.length > 0 && (
+                    <Col span={24}>
+                      <Form.Slot
+                        label={t('自定义 auto 分组顺序')}
+                        extraText={t(
+                          'auto 路由按此顺序尝试分组，留空则使用全局策略',
+                        )}
+                      >
+                        <AutoGroupOrderList
+                          candidates={autoGroupCandidates}
+                          value={
+                            Array.isArray(values.auto_groups)
+                              ? values.auto_groups
+                              : []
+                          }
+                          onChange={(next) =>
+                            formApiRef.current?.setValue('auto_groups', next)
+                          }
+                        />
+                      </Form.Slot>
+                    </Col>
+                  )}
                   <Col xs={24} sm={24} md={24} lg={10} xl={10}>
                     <Form.DatePicker
                       field='expired_time'

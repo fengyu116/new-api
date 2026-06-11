@@ -645,27 +645,34 @@ export const getLogsColumns = ({
           record.type === 5 ||
           record.type === 6
         ) {
-          if (record.group) {
-            return <>{renderGroup(record.group)}</>;
-          } else {
-            let other = null;
-            try {
-              other = JSON.parse(record.other);
-            } catch (e) {
-              console.error(
-                `Failed to parse record.other: "${record.other}".`,
-                e,
-              );
-            }
-            if (other === null) {
-              return <></>;
-            }
-            if (other.group !== undefined) {
-              return <>{renderGroup(other.group)}</>;
-            } else {
-              return <></>;
-            }
+          let other = null;
+          try {
+            other = JSON.parse(record.other);
+          } catch (e) {
+            other = null;
           }
+          const group =
+            record.group ||
+            (other && other.group !== undefined ? other.group : '');
+          if (!group) {
+            return <></>;
+          }
+          if (other && other.auto_route) {
+            return (
+              <span
+                className='inline-flex items-center gap-1'
+                title={t('自动路由命中')}
+              >
+                <span
+                  style={{ color: 'var(--semi-color-text-2)', fontSize: 12 }}
+                >
+                  auto →
+                </span>
+                {renderGroup(group)}
+              </span>
+            );
+          }
+          return <>{renderGroup(group)}</>;
         } else {
           return <></>;
         }

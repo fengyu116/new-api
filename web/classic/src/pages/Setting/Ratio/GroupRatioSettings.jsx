@@ -56,6 +56,7 @@ const OPTION_KEYS = [
   'GroupGroupRatio',
   'group_ratio_setting.group_special_usable_group',
   'AutoGroups',
+  'AutoGroupStrategy',
   'DefaultUseAutoGroup',
 ];
 
@@ -80,6 +81,7 @@ export default function GroupRatioSettings(props) {
     GroupGroupRatio: '',
     'group_ratio_setting.group_special_usable_group': '',
     AutoGroups: '',
+    AutoGroupStrategy: 'order',
     DefaultUseAutoGroup: false,
   });
   const refForm = useRef();
@@ -215,6 +217,27 @@ export default function GroupRatioSettings(props) {
               </div>
               <Text type='tertiary' size='small' style={{ marginTop: 4 }}>
                 {t('开启后创建令牌默认选择auto分组，初始令牌也将设为auto')}
+              </Text>
+            </Form.Slot>
+          </Col>
+          <Col xs={24} sm={12} md={16} lg={16} xl={16}>
+            <Form.Slot label={t('auto 选组策略')}>
+              <RadioGroup
+                type='button'
+                size='small'
+                value={inputs.AutoGroupStrategy || 'order'}
+                onChange={(e) =>
+                  setInputs((prev) => ({
+                    ...prev,
+                    AutoGroupStrategy: e.target.value,
+                  }))
+                }
+              >
+                <Radio value='order'>{t('按配置顺序')}</Radio>
+                <Radio value='cheapest'>{t('最低有效倍率优先')}</Radio>
+              </RadioGroup>
+              <Text type='tertiary' size='small' style={{ marginTop: 4, display: 'block' }}>
+                {t('auto 路由对候选分组的排序方式，令牌自定义顺序始终优先')}
               </Text>
             </Form.Slot>
           </Col>
@@ -398,6 +421,26 @@ export default function GroupRatioSettings(props) {
                 setInputs((prev) => ({ ...prev, AutoGroups: value }))
               }
             />
+          </Col>
+        </Row>
+        <Row gutter={16}>
+          <Col span={16}>
+            <Form.Slot label={t('auto 选组策略')}>
+              <RadioGroup
+                type='button'
+                size='small'
+                value={inputs.AutoGroupStrategy || 'order'}
+                onChange={(e) =>
+                  setInputs((prev) => ({
+                    ...prev,
+                    AutoGroupStrategy: e.target.value,
+                  }))
+                }
+              >
+                <Radio value='order'>{t('按配置顺序')}</Radio>
+                <Radio value='cheapest'>{t('最低有效倍率优先')}</Radio>
+              </RadioGroup>
+            </Form.Slot>
           </Col>
         </Row>
         <Row gutter={16}>
