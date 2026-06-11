@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/setting/special_pricing"
+	"github.com/QuantumNous/new-api/setting/task_billing_rules"
 
 	"gorm.io/gorm"
 )
@@ -36,10 +37,21 @@ type ImportReport struct {
 	MissingKeyGroups     []string              `json:"missing_key_groups"`
 	InvalidRows          []GroupKeyReportError `json:"invalid_rows,omitempty"`
 	SpecialPricingModels int                   `json:"special_pricing_models"`
+	TaskBillingRules     int                   `json:"task_billing_rules"`
+	SourceHashes         map[string]string     `json:"source_hashes,omitempty"`
+	PreviousSourceHashes map[string]string     `json:"previous_source_hashes,omitempty"`
+	SourceHashesChanged  bool                  `json:"source_hashes_changed"`
 	SkippedSpecialModels []string              `json:"skipped_special_models,omitempty"`
 	ChangedOptionKeys    []string              `json:"changed_option_keys"`
 	ManagedTagPrefix     string                `json:"managed_tag_prefix"`
 	Applied              bool                  `json:"applied"`
+}
+
+type providerImportState struct {
+	SourceHashes         map[string]string `json:"source_hashes,omitempty"`
+	SpecialPricingModels []string          `json:"special_pricing_models,omitempty"`
+	TaskBillingModels    []string          `json:"task_billing_models,omitempty"`
+	AppliedAt            int64             `json:"applied_at"`
 }
 
 type channelPlan struct {
@@ -71,12 +83,21 @@ func Apply(req ImportRequest) (ImportReport, error) {
 	}
 
 	plans := buildChannelPlans(req.Catalog, keyMapFromRows(req.GroupKeys))
+	optionValues, err := buildOptionValues(req.Catalog)
+	if err != nil {
+		return report, err
+	}
 	if err := model.DB.Transaction(func(tx *gorm.DB) error {
-		return applyCatalogTx(tx, req.Catalog, plans)
+		if !req.Catalog.SpecialOnly {
+			if err := applyCatalogTx(tx, req.Catalog, plans); err != nil {
+				return err
+			}
+		}
+		return model.SaveOptionsTx(tx, optionValues)
 	}); err != nil {
 		return report, err
 	}
-	if err := updateOptions(req.Catalog); err != nil {
+	if err := model.ApplyOptionValuesToMemory(optionValues); err != nil {
 		return report, err
 	}
 	model.InitChannelCache()
@@ -107,24 +128,29 @@ func buildReport(req ImportRequest, preservedKeys map[string]string) (ImportRepo
 		return ImportReport{}, fmt.Errorf("catalog 不能为空")
 	}
 	prefix := ProviderTagPrefix(req.Catalog.ProviderCode)
+	previousState := loadProviderImportState(req.Catalog.ProviderCode)
 	keyRows := keyMapFromRows(req.GroupKeys)
 	keyReport, keyErr := BuildGroupKeyReport(req.Catalog.ProviderCode, req.Catalog.BaseURL, req.GroupKeys)
 	report := ImportReport{
-		Mode:              "dry-run",
-		ProviderCode:      req.Catalog.ProviderCode,
-		ProviderName:      req.Catalog.ProviderName,
-		BaseURL:           strings.TrimRight(req.Catalog.BaseURL, "/"),
-		Models:            len(req.Catalog.Models),
-		Vendors:           len(req.Catalog.Vendors),
-		Groups:            len(req.Catalog.Groups),
-		ManagedTagPrefix:  prefix,
-		ChangedOptionKeys: changedOptionKeys(req.Catalog),
+		Mode:                 "dry-run",
+		ProviderCode:         req.Catalog.ProviderCode,
+		ProviderName:         req.Catalog.ProviderName,
+		BaseURL:              strings.TrimRight(req.Catalog.BaseURL, "/"),
+		Models:               len(req.Catalog.Models),
+		Vendors:              len(req.Catalog.Vendors),
+		Groups:               len(req.Catalog.Groups),
+		ManagedTagPrefix:     prefix,
+		ChangedOptionKeys:    changedOptionKeys(req.Catalog),
+		SourceHashes:         req.Catalog.SourceHashes,
+		PreviousSourceHashes: previousState.SourceHashes,
+		SourceHashesChanged:  hashesChanged(previousState.SourceHashes, req.Catalog.SourceHashes),
+		SkippedSpecialModels: append([]string(nil), req.Catalog.SkippedSpecialModels...),
 	}
 	if keyErr != nil {
 		report.InvalidRows = keyReport.InvalidRows
 	}
 	var count int64
-	if model.DB != nil {
+	if model.DB != nil && !req.Catalog.SpecialOnly {
 		_ = model.DB.Model(&model.Channel{}).Where("tag LIKE ?", prefix+"%").Count(&count).Error
 	}
 	report.ChannelsToReplace = count
@@ -141,7 +167,43 @@ func buildReport(req ImportRequest, preservedKeys map[string]string) (ImportRepo
 	}
 	report.MissingKeyGroups = sortedStructKeys(missing)
 	report.SpecialPricingModels = countSpecialPricingModels(req.Catalog.SpecialPricing)
+	report.TaskBillingRules = len(req.Catalog.TaskBillingRules)
+	if req.Catalog.SpecialOnly {
+		if err := validateSpecialOnlyProviderScope(req.Catalog); err != nil {
+			return report, err
+		}
+	}
 	return report, nil
+}
+
+func validateSpecialOnlyProviderScope(catalog *ProviderCatalog) error {
+	if model.DB == nil {
+		return nil
+	}
+	var channels []model.Channel
+	if err := model.DB.Where("tag LIKE ?", ProviderTagPrefix(catalog.ProviderCode)+"%").Find(&channels).Error; err != nil {
+		return err
+	}
+	managedModels := map[string]struct{}{}
+	for _, channel := range channels {
+		for _, modelName := range strings.Split(channel.Models, ",") {
+			modelName = strings.TrimSpace(modelName)
+			if modelName != "" {
+				managedModels[modelName] = struct{}{}
+			}
+		}
+	}
+	var outside []string
+	for modelName := range specialPricingModels(catalog.SpecialPricing) {
+		if _, ok := managedModels[modelName]; !ok {
+			outside = append(outside, modelName)
+		}
+	}
+	sort.Strings(outside)
+	if len(outside) > 0 {
+		return fmt.Errorf("特殊规则包含不属于供应商 %s 的模型: %s", catalog.ProviderCode, strings.Join(outside, ", "))
+	}
+	return nil
 }
 
 func applyCatalogTx(tx *gorm.DB, catalog *ProviderCatalog, plans []channelPlan) error {
@@ -337,8 +399,9 @@ func insertChannelPlanTx(tx *gorm.DB, catalog *ProviderCatalog, plan channelPlan
 	return nil
 }
 
-func updateOptions(catalog *ProviderCatalog) error {
+func buildOptionValues(catalog *ProviderCatalog) (map[string]string, error) {
 	values := map[string]string{}
+	previousState := loadProviderImportState(catalog.ProviderCode)
 	modelRatio := ratio_setting.GetModelRatioCopy()
 	modelPrice := ratio_setting.GetModelPriceCopy()
 	completionRatio := ratio_setting.GetCompletionRatioCopy()
@@ -399,16 +462,43 @@ func updateOptions(catalog *ProviderCatalog) error {
 		values["UserUsableGroups"] = mustJSON(userGroups)
 	}
 	if len(catalog.SpecialPricing) > 0 {
-		merged, err := mergeSpecialPricingOption(catalog.SpecialPricing)
+		merged, err := mergeSpecialPricingOption(catalog.SpecialPricing, previousState.SpecialPricingModels)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		values[special_pricing.OptionKey] = merged
 	}
-	return model.UpdateOptionsBulk(values)
+	if len(catalog.TaskBillingRules) > 0 {
+		removedTaskModels := previousState.TaskBillingModels
+		if catalog.SpecialOnly {
+			removedTaskModels = previousState.SpecialPricingModels
+		}
+		merged, err := mergeTaskBillingRulesOption(catalog.TaskBillingRules, removedTaskModels)
+		if err != nil {
+			return nil, err
+		}
+		values[task_billing_rules.OptionKey] = merged
+	}
+	state := buildProviderImportState(catalog, previousState)
+	values[ProviderImportStateOptionKey(catalog.ProviderCode)] = mustJSON(state)
+	return values, nil
 }
 
-func mergeSpecialPricingOption(incoming map[string]any) (string, error) {
+func mergeTaskBillingRulesOption(incoming map[string]task_billing_rules.Rule, removeModels []string) (string, error) {
+	current := map[string]task_billing_rules.Rule{}
+	if err := json.Unmarshal([]byte(task_billing_rules.ToJSONString()), &current); err != nil {
+		return "", err
+	}
+	for _, modelName := range removeModels {
+		delete(current, modelName)
+	}
+	for modelName, rule := range incoming {
+		current[modelName] = rule
+	}
+	return mustJSON(current), nil
+}
+
+func mergeSpecialPricingOption(incoming map[string]any, removeModels []string) (string, error) {
 	var current map[string]any
 	if err := json.Unmarshal([]byte(special_pricing.ToJSONString()), &current); err != nil {
 		return "", err
@@ -419,6 +509,9 @@ func mergeSpecialPricingOption(incoming map[string]any) (string, error) {
 	currentModels, _ := current["models"].(map[string]any)
 	if currentModels == nil {
 		currentModels = map[string]any{}
+	}
+	for _, modelName := range removeModels {
+		delete(currentModels, modelName)
 	}
 
 	incomingModels, _ := incoming["models"].(map[string]any)
@@ -438,6 +531,80 @@ func mergeSpecialPricingOption(incoming map[string]any) (string, error) {
 	}
 	current["models"] = currentModels
 	return mustJSON(current), nil
+}
+
+func buildProviderImportState(catalog *ProviderCatalog, previous providerImportState) providerImportState {
+	state := providerImportState{
+		SourceHashes:         catalog.SourceHashes,
+		SpecialPricingModels: sortedAnyKeys(specialPricingModels(catalog.SpecialPricing)),
+		TaskBillingModels:    sortedTaskRuleKeys(catalog.TaskBillingRules),
+		AppliedAt:            time.Now().Unix(),
+	}
+	if catalog.SpecialOnly {
+		nonSpecialTaskModels := make(map[string]struct{}, len(previous.TaskBillingModels))
+		previousSpecial := make(map[string]struct{}, len(previous.SpecialPricingModels))
+		for _, modelName := range previous.SpecialPricingModels {
+			previousSpecial[modelName] = struct{}{}
+		}
+		for _, modelName := range previous.TaskBillingModels {
+			if _, wasSpecial := previousSpecial[modelName]; !wasSpecial {
+				nonSpecialTaskModels[modelName] = struct{}{}
+			}
+		}
+		for modelName := range catalog.TaskBillingRules {
+			nonSpecialTaskModels[modelName] = struct{}{}
+		}
+		state.TaskBillingModels = sortedStructKeys(nonSpecialTaskModels)
+		if len(catalog.SourceHashes) == 0 {
+			state.SourceHashes = previous.SourceHashes
+		}
+	}
+	return state
+}
+
+func loadProviderImportState(providerCode string) providerImportState {
+	raw := strings.TrimSpace(common.OptionMap[ProviderImportStateOptionKey(providerCode)])
+	if raw == "" {
+		return providerImportState{}
+	}
+	var state providerImportState
+	if err := json.Unmarshal([]byte(raw), &state); err != nil {
+		return providerImportState{}
+	}
+	return state
+}
+
+func hashesChanged(previous, current map[string]string) bool {
+	if len(previous) == 0 {
+		return false
+	}
+	if len(previous) != len(current) {
+		return true
+	}
+	for name, hash := range previous {
+		if current[name] != hash {
+			return true
+		}
+	}
+	return false
+}
+
+func sortedAnyKeys(values map[string]any) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedTaskRuleKeys(values map[string]task_billing_rules.Rule) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func buildChannelPlans(catalog *ProviderCatalog, keys map[string]string) []channelPlan {
@@ -501,6 +668,10 @@ func changedOptionKeys(catalog *ProviderCatalog) []string {
 	if len(catalog.SpecialPricing) > 0 {
 		keys = append(keys, special_pricing.OptionKey)
 	}
+	if len(catalog.TaskBillingRules) > 0 {
+		keys = append(keys, task_billing_rules.OptionKey)
+	}
+	keys = append(keys, ProviderImportStateOptionKey(catalog.ProviderCode))
 	return keys
 }
 
@@ -563,6 +734,10 @@ func sortedStructKeys(m map[string]struct{}) []string {
 
 func LastImportReportOptionKey(providerCode string) string {
 	return "ProviderCatalogImportReport:" + providerCode
+}
+
+func ProviderImportStateOptionKey(providerCode string) string {
+	return "ProviderCatalogImportState:" + providerCode
 }
 
 func SaveLastReport(report ImportReport) error {

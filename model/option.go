@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/setting/special_pricing"
 	"github.com/QuantumNous/new-api/setting/system_setting"
+	"github.com/QuantumNous/new-api/setting/task_billing_rules"
 	"gorm.io/gorm"
 )
 
@@ -151,6 +152,7 @@ func InitOptionMap() {
 	common.OptionMap["AudioRatio"] = ratio_setting.AudioRatio2JSONString()
 	common.OptionMap["AudioCompletionRatio"] = ratio_setting.AudioCompletionRatio2JSONString()
 	common.OptionMap[special_pricing.OptionKey] = special_pricing.ToJSONString()
+	common.OptionMap[task_billing_rules.OptionKey] = task_billing_rules.ToJSONString()
 	common.OptionMap["TopUpLink"] = common.TopUpLink
 	//common.OptionMap["ChatLink"] = common.ChatLink
 	//common.OptionMap["ChatLink2"] = common.ChatLink2
@@ -231,21 +233,29 @@ func UpdateOptionsBulk(values map[string]string) error {
 		return nil
 	}
 	err := DB.Transaction(func(tx *gorm.DB) error {
-		for k, v := range values {
-			option := Option{Key: k}
-			if err := tx.FirstOrCreate(&option, Option{Key: k}).Error; err != nil {
-				return err
-			}
-			option.Value = v
-			if err := tx.Save(&option).Error; err != nil {
-				return err
-			}
-		}
-		return nil
+		return SaveOptionsTx(tx, values)
 	})
 	if err != nil {
 		return err
 	}
+	return ApplyOptionValuesToMemory(values)
+}
+
+func SaveOptionsTx(tx *gorm.DB, values map[string]string) error {
+	for k, v := range values {
+		option := Option{Key: k}
+		if err := tx.FirstOrCreate(&option, Option{Key: k}).Error; err != nil {
+			return err
+		}
+		option.Value = v
+		if err := tx.Save(&option).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ApplyOptionValuesToMemory(values map[string]string) error {
 	for k, v := range values {
 		if err := updateOptionMap(k, v); err != nil {
 			return err
@@ -547,6 +557,8 @@ func updateOptionMap(key string, value string) (err error) {
 		err = ratio_setting.UpdateAudioCompletionRatioByJSONString(value)
 	case special_pricing.OptionKey:
 		err = special_pricing.UpdateByJSONString(value)
+	case task_billing_rules.OptionKey:
+		err = task_billing_rules.UpdateByJSONString(value)
 	case "TopUpLink":
 		common.TopUpLink = value
 	//case "ChatLink":

@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -21,6 +22,16 @@ func ProviderCatalogPreview(c *gin.Context) {
 	}
 	report, err := catalogimport.DryRun(req)
 	if err != nil && len(report.InvalidRows) == 0 {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, report)
+}
+
+func ProviderCatalogBillingAudit(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	report, err := catalogimport.AuditTaskBilling(limit)
+	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
@@ -57,19 +68,56 @@ func buildProviderCatalogImportRequest(c *gin.Context, apply bool) (catalogimpor
 	if providerName == "" {
 		providerName = providerCode
 	}
-	ruleContent, err := readMultipartFile(c, "rule_file")
+	var catalog *catalogimport.ProviderCatalog
+	var err error
+	if providerCode == "vector" && hasMultipartFile(c, "normal_rule_file") && hasMultipartFile(c, "special_rule_file") {
+		ruleType = catalogimport.RuleTypeVectorBundle
+	}
+	if ruleType == catalogimport.RuleTypeVectorBundle {
+		normalContent, readErr := readMultipartFile(c, "normal_rule_file")
+		if readErr != nil {
+			return catalogimport.ImportRequest{}, readErr
+		}
+		specialContent, readErr := readMultipartFile(c, "special_rule_file")
+		if readErr != nil {
+			return catalogimport.ImportRequest{}, readErr
+		}
+		catalog, err = catalogimport.ParseVectorBundle(catalogimport.VectorBundleRequest{
+			ProviderCode:   providerCode,
+			ProviderName:   providerName,
+			BaseURL:        baseURL,
+			NormalContent:  normalContent,
+			SpecialContent: specialContent,
+		})
+	} else {
+		ruleField := "rule_file"
+		if providerCode == "vector" && ruleType == catalogimport.RuleTypeVectorNormal && hasMultipartFile(c, "normal_rule_file") {
+			ruleField = "normal_rule_file"
+		}
+		if providerCode == "vector" && ruleType == catalogimport.RuleTypeVectorSpecial && hasMultipartFile(c, "special_rule_file") {
+			ruleField = "special_rule_file"
+		}
+		ruleContent, readErr := readMultipartFile(c, ruleField)
+		if readErr != nil {
+			return catalogimport.ImportRequest{}, readErr
+		}
+		catalog, err = catalogimport.ParseCatalog(catalogimport.ParseRequest{
+			ProviderCode: providerCode,
+			ProviderName: providerName,
+			RuleType:     ruleType,
+			BaseURL:      baseURL,
+			Content:      ruleContent,
+		})
+	}
 	if err != nil {
 		return catalogimport.ImportRequest{}, err
 	}
-	catalog, err := catalogimport.ParseCatalog(catalogimport.ParseRequest{
-		ProviderCode: providerCode,
-		ProviderName: providerName,
-		RuleType:     ruleType,
-		BaseURL:      baseURL,
-		Content:      ruleContent,
-	})
-	if err != nil {
-		return catalogimport.ImportRequest{}, err
+	if providerCode == "vector" && ruleType == catalogimport.RuleTypeVectorNormal {
+		for _, item := range catalog.Models {
+			if item.QuotaType == 1 {
+				return catalogimport.ImportRequest{}, fmt.Errorf("向量普通规则包含固定价模型，必须使用“向量完整目录”同时导入普通与特殊规则")
+			}
+		}
 	}
 	var tokenRows []catalogimport.TokenRow
 	if keyContent, err := readOptionalMultipartFile(c, "key_file"); err == nil && len(keyContent) > 0 {
@@ -79,6 +127,11 @@ func buildProviderCatalogImportRequest(c *gin.Context, apply bool) (catalogimpor
 		}
 	}
 	return catalogimport.ImportRequest{Catalog: catalog, GroupKeys: tokenRows, Apply: apply}, nil
+}
+
+func hasMultipartFile(c *gin.Context, field string) bool {
+	_, err := c.FormFile(field)
+	return err == nil
 }
 
 func readMultipartFile(c *gin.Context, field string) ([]byte, error) {

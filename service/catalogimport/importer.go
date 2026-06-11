@@ -3,6 +3,7 @@ package catalogimport
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -10,16 +11,173 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/setting/task_billing_rules"
 )
+
+func ParseVectorBundle(req VectorBundleRequest) (*ProviderCatalog, error) {
+	catalog, err := parseVectorNormal(ParseRequest{
+		ProviderCode: req.ProviderCode,
+		ProviderName: req.ProviderName,
+		RuleType:     RuleTypeVectorNormal,
+		BaseURL:      req.BaseURL,
+		Content:      req.NormalContent,
+	})
+	if err != nil {
+		return nil, err
+	}
+	specialRequired := false
+	requiredSpecialModels := map[string]struct{}{}
+	normalModels := make(map[string]struct{}, len(catalog.Models))
+	for _, item := range catalog.Models {
+		normalModels[item.Name] = struct{}{}
+		if isSpecialCatalogModel(item) {
+			specialRequired = true
+			requiredSpecialModels[item.Name] = struct{}{}
+		}
+	}
+	if len(req.SpecialContent) == 0 {
+		if specialRequired {
+			return nil, fmt.Errorf("普通规则包含特殊计费模型，必须同时上传特殊规则")
+		}
+	} else {
+		specialCatalog, err := parseVectorSpecial(ParseRequest{
+			ProviderCode: req.ProviderCode,
+			ProviderName: req.ProviderName,
+			RuleType:     RuleTypeVectorSpecial,
+			BaseURL:      req.BaseURL,
+			Content:      req.SpecialContent,
+		})
+		if err != nil {
+			return nil, err
+		}
+		incomingSpecialModels := specialPricingModels(specialCatalog.SpecialPricing)
+		for modelName, rawRule := range incomingSpecialModels {
+			if _, ok := normalModels[modelName]; !ok {
+				rule, _ := rawRule.(map[string]any)
+				billingEnabled, _ := rule["billing_enabled"].(bool)
+				if billingEnabled {
+					return nil, fmt.Errorf("特殊规则模型 %s 不存在于普通规则", modelName)
+				}
+				delete(incomingSpecialModels, modelName)
+				catalog.SkippedSpecialModels = append(catalog.SkippedSpecialModels, modelName)
+			}
+		}
+		sort.Strings(catalog.SkippedSpecialModels)
+		for modelName := range requiredSpecialModels {
+			if _, ok := incomingSpecialModels[modelName]; !ok {
+				return nil, fmt.Errorf("普通规则模型 %s 需要特殊规则，但特殊规则文件未包含该模型", modelName)
+			}
+		}
+		catalog.SpecialPricing = specialCatalog.SpecialPricing
+	}
+	catalog.TaskBillingRules = buildTaskBillingRules(catalog)
+	if ambiguous := ambiguousTaskBillingModels(catalog); len(ambiguous) > 0 {
+		return nil, fmt.Errorf("以下任务模型无法确定计费单位: %s", strings.Join(ambiguous, ", "))
+	}
+	catalog.SourceHashes = map[string]string{
+		"normal": fmt.Sprintf("%x", sha256.Sum256(req.NormalContent)),
+	}
+	if len(req.SpecialContent) > 0 {
+		catalog.SourceHashes["special"] = fmt.Sprintf("%x", sha256.Sum256(req.SpecialContent))
+	}
+	return catalog, nil
+}
+
+func specialPricingModels(value map[string]any) map[string]any {
+	if models, ok := value["models"].(map[string]any); ok {
+		return models
+	}
+	return value
+}
+
+func isSpecialCatalogModel(item CatalogModel) bool {
+	_, ok := vectorSpecialModelNames[item.Name]
+	return ok
+}
+
+var vectorSpecialModelNames = map[string]struct{}{
+	"aigc-template-effect-vidu": {}, "aigc-video-hailuo": {}, "aigc-video-kling": {},
+	"aigc-video-vidu": {}, "alibailian-video": {}, "audio1.0": {},
+	"doubao-seedance-2-0-260128": {}, "doubao-seedance-2-0-fast-260128": {},
+	"gemini-3-pro-image-preview": {}, "gemini-3.1-flash-image-preview": {},
+	"jimeng-videos": {}, "kling-advanced-lip-sync": {}, "kling-audio": {},
+	"kling-avatar-image2video": {}, "kling-effects": {}, "kling-image": {},
+	"kling-image-recognize": {}, "kling-kolors-virtual-try-on": {},
+	"kling-motion-control": {}, "kling-multi-elements": {}, "kling-omni-image": {},
+	"kling-omni-video": {}, "kling-video": {}, "kling-video-extend": {},
+	"MiniMax-Hailuo-02": {}, "MiniMax-Hailuo-2.3": {}, "MiniMax-Hailuo-2.3-Fast": {},
+	"pixverse-image-template": {}, "pixverse-lipsync": {}, "pixverse-mask-selection": {},
+	"pixverse-mimic": {}, "pixverse-modify": {}, "pixverse-multi-transition": {},
+	"pixverse-restyle": {}, "pixverse-sound-effect": {}, "pixverse-swap": {},
+	"pixverse-upload": {}, "pixverse-video": {}, "sora-2": {}, "sora-2-pro": {},
+	"suno_music_open": {}, "vidu-tts": {}, "vidu2.0": {}, "viduq1": {},
+	"viduq1-classic": {}, "viduq2": {}, "viduq2-pro": {}, "viduq2-turbo": {},
+	"viduq3": {}, "viduq3-mix": {}, "viduq3-pro": {}, "viduq3-turbo": {},
+	"wan2.5-i2v-preview": {}, "wan2.6-i2v": {}, "wan2.6-i2v-flash": {},
+}
+
+func buildTaskBillingRules(catalog *ProviderCatalog) map[string]task_billing_rules.Rule {
+	result := map[string]task_billing_rules.Rule{}
+	specialModels := specialPricingModels(catalog.SpecialPricing)
+	for _, item := range catalog.Models {
+		if _, ok := specialModels[item.Name]; ok {
+			result[item.Name] = task_billing_rules.Rule{Mode: task_billing_rules.ModeSpecial}
+			continue
+		}
+		name := strings.ToLower(item.Name)
+		endpoints := strings.ToLower(strings.Join(item.SupportedEndpointTypes, ","))
+		if item.QuotaType == 1 && (strings.Contains(endpoints, "视频") || strings.Contains(endpoints, "video")) {
+			if strings.HasPrefix(name, "grok-video-") {
+				rule := task_billing_rules.Rule{Mode: task_billing_rules.ModePerCall}
+				if match := regexp.MustCompile(`-(\d+)s$`).FindStringSubmatch(name); len(match) == 2 {
+					rule.FixedDuration, _ = strconv.Atoi(match[1])
+				}
+				result[item.Name] = rule
+			} else if name == "sora-2-all" {
+				result[item.Name] = task_billing_rules.Rule{
+					Mode:      task_billing_rules.ModePerUnit,
+					RatioKeys: []string{"seconds", "size"},
+				}
+			}
+		}
+	}
+	return result
+}
+
+func ambiguousTaskBillingModels(catalog *ProviderCatalog) []string {
+	var ambiguous []string
+	for _, item := range catalog.Models {
+		if item.QuotaType != 1 || !isTaskLikeModel(item) {
+			continue
+		}
+		if _, ok := catalog.TaskBillingRules[item.Name]; !ok {
+			ambiguous = append(ambiguous, item.Name)
+		}
+	}
+	sort.Strings(ambiguous)
+	return ambiguous
+}
+
+func isTaskLikeModel(item CatalogModel) bool {
+	endpoints := strings.ToLower(strings.Join(item.SupportedEndpointTypes, ","))
+	for _, marker := range []string{"视频", "video", "音乐"} {
+		if strings.Contains(endpoints, marker) {
+			return true
+		}
+	}
+	return false
+}
 
 const (
 	RuleTypeVectorNormal  = "vector_normal"
 	RuleTypeVectorSpecial = "vector_special"
+	RuleTypeVectorBundle  = "vector_bundle"
 	RuleTypeShenggeNormal = "shengge_normal"
 )
 
@@ -124,11 +282,20 @@ func parseVectorSpecial(req ParseRequest) (*ProviderCatalog, error) {
 	if err := json.Unmarshal(req.Content, &raw); err != nil {
 		return nil, fmt.Errorf("特殊规则必须使用标准 JSON，不能上传前端打包 JS: %w", err)
 	}
+	taskRules := map[string]task_billing_rules.Rule{}
+	for modelName := range specialPricingModels(raw) {
+		taskRules[modelName] = task_billing_rules.Rule{Mode: task_billing_rules.ModeSpecial}
+	}
 	catalog := &ProviderCatalog{
-		ProviderCode:   req.ProviderCode,
-		ProviderName:   req.ProviderName,
-		BaseURL:        strings.TrimRight(req.BaseURL, "/"),
-		SpecialPricing: raw,
+		ProviderCode:     req.ProviderCode,
+		ProviderName:     req.ProviderName,
+		BaseURL:          strings.TrimRight(req.BaseURL, "/"),
+		SpecialPricing:   raw,
+		TaskBillingRules: taskRules,
+		SourceHashes: map[string]string{
+			"special": fmt.Sprintf("%x", sha256.Sum256(req.Content)),
+		},
+		SpecialOnly: true,
 	}
 	return catalog, nil
 }

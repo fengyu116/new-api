@@ -1650,6 +1650,9 @@ export function renderModelPrice(opts) {
     audio_input_price: audioInputPrice = 0,
     image_generation_call: imageGenerationCall = false,
     image_generation_call_price: imageGenerationCallPrice = 0,
+    task_billing_mode: taskBillingMode,
+    task_billing_multiplier: taskBillingMultiplier = 1,
+    task_final_price: taskFinalPrice,
     displayMode = 'price',
   } = opts;
   const { ratio: effectiveGroupRatio, label: ratioLabel } = getEffectiveRatio(
@@ -1660,6 +1663,32 @@ export function renderModelPrice(opts) {
   const completionRatio = _completionRatio ?? 0;
 
   const { symbol, rate } = getCurrencyConfig();
+
+  if (taskBillingMode && Number.isFinite(taskFinalPrice)) {
+    const modeLabel =
+        taskBillingMode === 'per_call' ? '固定按次' : '按规格计费';
+    return renderBillingArticle([
+      buildBillingPriceText('{{mode}}：{{symbol}}{{price}}', {
+        mode: modeLabel,
+        symbol,
+        usdAmount: modelPrice,
+        rate,
+      }),
+      buildBillingPriceText(
+          '{{symbol}}{{price}} * 任务倍率 {{ratio}} * {{ratioType}} {{groupRatio}} = {{symbol}}{{total}}',
+          {
+            symbol,
+            usdAmount: modelPrice,
+            rate,
+            ratio: taskBillingMultiplier,
+            ratioType: ratioLabel,
+            groupRatio,
+            amountKey: 'price',
+            total: formatBillingDisplayPrice(taskFinalPrice, rate),
+          },
+      ),
+    ]);
+  }
 
   if (!shouldUseRatioBillingProcess(modelPrice)) {
     if (modelPrice !== -1) {

@@ -171,11 +171,27 @@ function BillingBreakdown(props: {
       })
     }
   } else if (isPerCall) {
-    rows.push({ label: t('Billing Mode'), value: t('Per-call') })
+    rows.push({
+      label: t('Billing Mode'),
+      value:
+        other.task_billing_mode === 'per_unit' ? t('Per-unit') : t('Per-call'),
+    })
     if (other.model_price != null) {
       rows.push({
         label: t('Model Price'),
         value: fmtPrice(other.model_price),
+      })
+    }
+    if (other.task_billing_multiplier != null) {
+      rows.push({
+        label: t('Task Multiplier'),
+        value: `${formatRatio(other.task_billing_multiplier)}x`,
+      })
+    }
+    if (other.task_final_price != null) {
+      rows.push({
+        label: t('Actual charge'),
+        value: fmtPrice(other.task_final_price),
       })
     }
   } else {

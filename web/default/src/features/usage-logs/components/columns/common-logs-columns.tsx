@@ -192,11 +192,39 @@ function buildDetailSegments(
       })
     }
   } else {
+    const isTaskPerUnit = other.task_billing_mode === 'per_unit'
     const isPerCall = isPerCallBilling(other.model_price)
-    if (isPerCall) {
+    if (isTaskPerUnit && other.model_price != null) {
+      const ratios = Object.entries(other.task_applied_ratios ?? {})
+        .filter(([, value]) => Number.isFinite(value) && value !== 1)
+        .map(([key, value]) => `${key} ${formatRatioCompact(value)}`)
+      const formula = [
+        formatBillingCurrencyFromUSD(other.model_price, priceOpts),
+        ...ratios,
+        other.group_ratio != null
+          ? `${t('Group Ratio')} ${formatRatioCompact(other.group_ratio)}x`
+          : null,
+      ].filter(Boolean)
+      segments.push({ text: formula.join(' × ') })
+      if (other.task_final_price != null) {
+        segments.push({
+          text: `${t('Actual charge')} · ${formatBillingCurrencyFromUSD(other.task_final_price, priceOpts)}`,
+          muted: true,
+        })
+      }
+    } else if (isPerCall) {
       segments.push({
         text: `${t('Per-call')} · ${formatBillingCurrencyFromUSD(other.model_price!, priceOpts)}`,
       })
+      if (
+        other.task_final_price != null &&
+        Number.isFinite(other.task_final_price)
+      ) {
+        segments.push({
+          text: `${t('Actual charge')} · ${formatBillingCurrencyFromUSD(other.task_final_price, priceOpts)}`,
+          muted: true,
+        })
+      }
     } else if (other.model_ratio != null) {
       const inputPriceUSD = other.model_ratio * 2.0
       const baseEntries = [formatPriceCompact(inputPriceUSD)]
@@ -753,7 +781,7 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
 
         return (
           <div className='flex flex-col gap-0.5'>
-            <span className='border-border/80 bg-muted/60 inline-flex h-6 w-fit items-center rounded-md border px-2 text-sm leading-none [font-family:var(--font-body)] font-semibold tabular-nums'>
+            <span className='border-border/80 bg-muted/60 inline-flex h-6 w-fit items-center rounded-md border px-2 [font-family:var(--font-body)] text-sm leading-none font-semibold tabular-nums'>
               {quotaDisplay.prefix && (
                 <span className='mr-1'>{quotaDisplay.prefix}</span>
               )}

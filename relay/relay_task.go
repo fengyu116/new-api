@@ -19,6 +19,8 @@ import (
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/task_billing_rules"
+	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 )
 
@@ -28,6 +30,15 @@ type TaskSubmitResult struct {
 	Platform       constant.TaskPlatform
 	Quota          int
 	//PerCallPrice   types.PriceData
+}
+
+const taskBillingResultContextKey = "task_billing_result"
+
+type taskBillingResult struct {
+	Configured    bool
+	Mode          string
+	AppliedRatios map[string]float64
+	Multiplier    float64
 }
 
 // ResolveOriginTask 处理基于已有任务的提交（remix / continuation）：
@@ -198,14 +209,13 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		return nil, service.TaskErrorWrapper(specialPriceErr, "model_price_error", http.StatusBadRequest)
 	}
 
-	// 6. 将 OtherRatios 应用到基础额度
-	if !specialPriced && !common.StringsContains(constant.TaskPricePatches, modelName) {
-		for _, ra := range info.PriceData.OtherRatios {
-			if ra != 1.0 {
-				info.PriceData.Quota = int(float64(info.PriceData.Quota) * ra)
-			}
-		}
+	// 6. 按持久化计费规则筛选并应用 OtherRatios。
+	taskReq, _ := relaycommon.GetTaskRequest(c)
+	billingResult, err := applyConfiguredTaskBilling(modelName, taskReq, &info.PriceData, specialPriced)
+	if err != nil {
+		return nil, service.TaskErrorWrapper(err, "model_price_error", http.StatusBadRequest)
 	}
+	c.Set(taskBillingResultContextKey, billingResult)
 
 	// 7. 预扣费（仅首次 — 重试时 info.Billing 已存在，跳过）
 	if info.Billing == nil && !info.PriceData.FreeModel {
@@ -248,9 +258,16 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	// 11. 提交后计费调整：让适配器根据上游实际返回调整 OtherRatios
 	finalQuota := info.PriceData.Quota
 	if adjustedRatios := adaptor.AdjustBillingOnSubmit(info, taskData); len(adjustedRatios) > 0 {
-		// 基于调整后的 ratios 重新计算 quota
-		finalQuota = recalcQuotaFromRatios(info, adjustedRatios)
-		info.PriceData.OtherRatios = adjustedRatios
+		finalRatios := adjustedRatios
+		finalMultiplier := info.PriceData.TaskBillingMultiplier
+		finalQuota, finalRatios, finalMultiplier = recalculateConfiguredTaskBilling(
+			info,
+			billingResult,
+			adjustedRatios,
+		)
+		info.PriceData.OtherRatios = finalRatios
+		info.PriceData.TaskAppliedRatios = finalRatios
+		info.PriceData.TaskBillingMultiplier = finalMultiplier
 		info.PriceData.Quota = finalQuota
 	}
 
@@ -260,6 +277,99 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		Platform:       platform,
 		Quota:          finalQuota,
 	}, nil
+}
+
+func applyConfiguredTaskBilling(
+	modelName string,
+	req relaycommon.TaskSubmitReq,
+	priceData *types.PriceData,
+	specialPriced bool,
+) (taskBillingResult, error) {
+	resolved, configured, err := task_billing_rules.Resolve(modelName, req, priceData.OtherRatios)
+	if err != nil {
+		return taskBillingResult{Configured: configured}, err
+	}
+	if configured {
+		result := taskBillingResult{
+			Configured:    true,
+			Mode:          resolved.Mode,
+			AppliedRatios: resolved.AppliedRatios,
+			Multiplier:    resolved.Multiplier,
+		}
+		if resolved.Mode == task_billing_rules.ModeSpecial {
+			if !specialPriced {
+				return result, fmt.Errorf("model %s requires special pricing but no special rule matched", modelName)
+			}
+			priceData.TaskBillingMode = resolved.Mode
+			priceData.TaskBillingMultiplier = 1
+			priceData.TaskAppliedRatios = map[string]float64{}
+			priceData.OtherRatios = map[string]float64{}
+			return result, nil
+		}
+		priceData.OtherRatios = resolved.AppliedRatios
+		priceData.TaskBillingMode = resolved.Mode
+		priceData.TaskBillingMultiplier = resolved.Multiplier
+		priceData.TaskAppliedRatios = resolved.AppliedRatios
+		if resolved.Multiplier != 1 {
+			priceData.Quota = int(float64(priceData.Quota) * resolved.Multiplier)
+		}
+		return result, nil
+	}
+
+	result := taskBillingResult{
+		Mode:          task_billing_rules.ModePerUnit,
+		AppliedRatios: priceData.OtherRatios,
+		Multiplier:    1,
+	}
+	if specialPriced || common.StringsContains(constant.TaskPricePatches, modelName) {
+		priceData.TaskBillingMode = result.Mode
+		priceData.TaskBillingMultiplier = 1
+		priceData.TaskAppliedRatios = map[string]float64{}
+		return result, nil
+	}
+	for _, ratio := range priceData.OtherRatios {
+		if ratio != 1 {
+			result.Multiplier *= ratio
+			priceData.Quota = int(float64(priceData.Quota) * ratio)
+		}
+	}
+	priceData.TaskBillingMode = result.Mode
+	priceData.TaskBillingMultiplier = result.Multiplier
+	priceData.TaskAppliedRatios = result.AppliedRatios
+	return result, nil
+}
+
+func recalculateConfiguredTaskBilling(
+	info *relaycommon.RelayInfo,
+	billingResult taskBillingResult,
+	adjustedRatios map[string]float64,
+) (int, map[string]float64, float64) {
+	if billingResult.Configured {
+		switch billingResult.Mode {
+		case task_billing_rules.ModePerCall, task_billing_rules.ModeSpecial:
+			return info.PriceData.Quota, map[string]float64{}, 1
+		case task_billing_rules.ModePerUnit:
+			filtered := make(map[string]float64, len(billingResult.AppliedRatios))
+			for key, currentRatio := range billingResult.AppliedRatios {
+				ratio := currentRatio
+				if adjustedRatio, ok := adjustedRatios[key]; ok && adjustedRatio > 0 {
+					ratio = adjustedRatio
+				}
+				filtered[key] = ratio
+			}
+			multiplier := 1.0
+			for _, ratio := range filtered {
+				multiplier *= ratio
+			}
+			return recalcQuotaFromRatios(info, filtered), filtered, multiplier
+		}
+	}
+
+	multiplier := 1.0
+	for _, ratio := range adjustedRatios {
+		multiplier *= ratio
+	}
+	return recalcQuotaFromRatios(info, adjustedRatios), adjustedRatios, multiplier
 }
 
 // recalcQuotaFromRatios 根据 adjustedRatios 重新计算 quota。

@@ -40,6 +40,13 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo) {
 	other["is_task"] = true
 	other["request_path"] = c.Request.URL.Path
 	other["model_price"] = info.PriceData.ModelPrice
+	if info.PriceData.TaskBillingMode != "" {
+		other["task_billing_mode"] = info.PriceData.TaskBillingMode
+		other["task_billing_multiplier"] = info.PriceData.TaskBillingMultiplier
+		other["task_applied_ratios"] = info.PriceData.TaskAppliedRatios
+		other["task_final_quota"] = info.PriceData.Quota
+		other["task_final_price"] = float64(info.PriceData.Quota) / common.QuotaPerUnit
+	}
 	if info.PriceData.ModelRatio > 0 {
 		other["model_ratio"] = info.PriceData.ModelRatio
 	}
@@ -139,6 +146,12 @@ func taskBillingOther(task *model.Task) map[string]interface{} {
 			other["model_ratio"] = bc.ModelRatio
 		}
 		other["group_ratio"] = bc.GroupRatio
+		if bc.BillingMode != "" {
+			other["task_billing_mode"] = bc.BillingMode
+			other["task_billing_multiplier"] = bc.BillingMultiplier
+			other["task_final_quota"] = task.Quota
+			other["task_final_price"] = float64(task.Quota) / common.QuotaPerUnit
+		}
 		if len(bc.OtherRatios) > 0 {
 			for k, v := range bc.OtherRatios {
 				other[k] = v

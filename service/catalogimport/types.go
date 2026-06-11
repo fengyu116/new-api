@@ -1,5 +1,7 @@
 package catalogimport
 
+import "github.com/QuantumNous/new-api/setting/task_billing_rules"
+
 type ParseRequest struct {
 	ProviderCode string
 	ProviderName string
@@ -40,15 +42,27 @@ type CatalogModel struct {
 }
 
 type ProviderCatalog struct {
-	ProviderCode   string             `json:"provider_code"`
-	ProviderName   string             `json:"provider_name"`
-	BaseURL        string             `json:"base_url"`
-	AutoGroups     []string           `json:"auto_groups,omitempty"`
-	Vendors        []CatalogVendor    `json:"vendors,omitempty"`
-	Groups         map[string]string  `json:"groups,omitempty"`
-	GroupRatios    map[string]float64 `json:"group_ratios,omitempty"`
-	Models         []CatalogModel     `json:"models,omitempty"`
-	SpecialPricing map[string]any     `json:"special_pricing,omitempty"`
+	ProviderCode         string                             `json:"provider_code"`
+	ProviderName         string                             `json:"provider_name"`
+	BaseURL              string                             `json:"base_url"`
+	AutoGroups           []string                           `json:"auto_groups,omitempty"`
+	Vendors              []CatalogVendor                    `json:"vendors,omitempty"`
+	Groups               map[string]string                  `json:"groups,omitempty"`
+	GroupRatios          map[string]float64                 `json:"group_ratios,omitempty"`
+	Models               []CatalogModel                     `json:"models,omitempty"`
+	SpecialPricing       map[string]any                     `json:"special_pricing,omitempty"`
+	TaskBillingRules     map[string]task_billing_rules.Rule `json:"task_billing_rules,omitempty"`
+	SourceHashes         map[string]string                  `json:"source_hashes,omitempty"`
+	SpecialOnly          bool                               `json:"-"`
+	SkippedSpecialModels []string                           `json:"-"`
+}
+
+type VectorBundleRequest struct {
+	ProviderCode   string
+	ProviderName   string
+	BaseURL        string
+	NormalContent  []byte
+	SpecialContent []byte
 }
 
 type TokenRow struct {

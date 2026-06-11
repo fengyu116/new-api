@@ -58,6 +58,7 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			providerCatalogRoute.POST("/preview", controller.ProviderCatalogPreview)
 			providerCatalogRoute.POST("/apply", controller.ProviderCatalogApply)
+			providerCatalogRoute.GET("/billing-audit", controller.ProviderCatalogBillingAudit)
 		}
 
 		apiRouter.POST("/stripe/webhook", anonymousRequestBodyLimit, controller.StripeWebhook)

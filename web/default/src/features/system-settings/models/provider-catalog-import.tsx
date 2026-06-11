@@ -48,6 +48,10 @@ type ProviderCatalogReport = {
   missing_key_groups?: string[]
   invalid_rows?: Array<{ row: number; field: string; message: string }>
   special_pricing_models: number
+  task_billing_rules: number
+  source_hashes?: Record<string, string>
+  previous_source_hashes?: Record<string, string>
+  source_hashes_changed: boolean
   skipped_special_models?: string[]
   changed_option_keys: string[]
   managed_tag_prefix: string
@@ -58,6 +62,21 @@ type ApiResponse<T> = {
   success: boolean
   message: string
   data: T
+}
+
+type BillingAuditReport = {
+  scanned: number
+  affected: number
+  difference_quota: number
+  dry_run: boolean
+  rows: Array<{
+    task_id: string
+    user_id: number
+    model_name: string
+    actual_quota: number
+    expected_quota: number
+    difference_quota: number
+  }>
 }
 
 const PRESETS: Record<
@@ -72,7 +91,7 @@ const PRESETS: Record<
   vector: {
     providerCode: 'vector',
     providerName: '向量',
-    ruleType: 'vector_normal',
+    ruleType: 'vector_bundle',
     baseUrl: '',
   },
   shengge: {
@@ -90,8 +109,9 @@ const PRESETS: Record<
 }
 
 const RULE_TYPES = [
-  { value: 'vector_normal', label: '向量普通规则 JSON' },
-  { value: 'vector_special', label: '向量特殊规则 JSON' },
+  { value: 'vector_bundle', label: '向量完整目录（普通 + 特殊）' },
+  { value: 'vector_normal', label: '仅向量普通规则（不含固定价模型）' },
+  { value: 'vector_special', label: '仅更新向量特殊规则（高级）' },
   { value: 'shengge_normal', label: '胜哥普通规则 JSON' },
 ]
 
@@ -104,19 +124,27 @@ export function ProviderCatalogImportSection() {
   const [ruleType, setRuleType] = useState(PRESETS.vector.ruleType)
   const [baseUrl, setBaseUrl] = useState('')
   const [ruleFile, setRuleFile] = useState<File | null>(null)
+  const [normalRuleFile, setNormalRuleFile] = useState<File | null>(null)
+  const [specialRuleFile, setSpecialRuleFile] = useState<File | null>(null)
   const [keyFile, setKeyFile] = useState<File | null>(null)
   const [confirm, setConfirm] = useState('')
   const [report, setReport] = useState<ProviderCatalogReport | null>(null)
   const [message, setMessage] = useState('')
   const [loading, setLoading] = useState<'preview' | 'apply' | null>(null)
+  const [auditLoading, setAuditLoading] = useState(false)
+  const [auditReport, setAuditReport] = useState<BillingAuditReport | null>(
+    null
+  )
 
   const canSubmit = useMemo(
     () =>
       providerCode.trim() !== '' &&
       ruleType.trim() !== '' &&
       baseUrl.trim() !== '' &&
-      ruleFile !== null,
-    [baseUrl, providerCode, ruleFile, ruleType]
+      (ruleType === 'vector_bundle'
+        ? normalRuleFile !== null && specialRuleFile !== null
+        : ruleFile !== null),
+    [baseUrl, normalRuleFile, providerCode, ruleFile, ruleType, specialRuleFile]
   )
 
   const applyPreset = (next: ProviderPreset) => {
@@ -134,7 +162,12 @@ export function ProviderCatalogImportSection() {
     form.append('provider_name', providerName.trim())
     form.append('rule_type', ruleType.trim())
     form.append('base_url', baseUrl.trim())
-    if (ruleFile) form.append('rule_file', ruleFile)
+    if (ruleType === 'vector_bundle') {
+      if (normalRuleFile) form.append('normal_rule_file', normalRuleFile)
+      if (specialRuleFile) form.append('special_rule_file', specialRuleFile)
+    } else if (ruleFile) {
+      form.append('rule_file', ruleFile)
+    }
     if (keyFile) form.append('key_file', keyFile)
     if (mode === 'apply') form.append('confirm', confirm.trim())
     return form
@@ -161,13 +194,33 @@ export function ProviderCatalogImportSection() {
     }
   }
 
+  const runBillingAudit = async () => {
+    setAuditLoading(true)
+    setMessage('')
+    try {
+      const res = await api.get<ApiResponse<BillingAuditReport>>(
+        '/api/provider-catalog/billing-audit?limit=10000'
+      )
+      if (!res.data.success) {
+        setMessage(res.data.message || '历史计费扫描失败')
+        return
+      }
+      setAuditReport(res.data.data)
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '历史计费扫描失败')
+    } finally {
+      setAuditLoading(false)
+    }
+  }
+
   return (
     <div className='grid gap-4'>
       <Card>
         <CardHeader>
           <CardTitle>供应商目录导入</CardTitle>
           <CardDescription>
-            普通规则、特殊规则、分组 key 分开上传；先 dry-run，确认后才写入。
+            向量默认同时上传普通规则和特殊规则，统一
+            dry-run、统一确认并原子写入。
           </CardDescription>
         </CardHeader>
         <CardContent className='grid gap-4'>
@@ -225,20 +278,45 @@ export function ProviderCatalogImportSection() {
           </div>
 
           <div className='grid gap-3 md:grid-cols-2'>
-            <Field label='规则文件'>
-              <Input
-                type='file'
-                accept='.txt,.json'
-                onChange={(event) =>
-                  setRuleFile(event.target.files?.[0] ?? null)
-                }
-              />
-            </Field>
+            {ruleType === 'vector_bundle' ? (
+              <>
+                <Field label='向量普通规则'>
+                  <Input
+                    type='file'
+                    accept='.txt,.json'
+                    onChange={(event) =>
+                      setNormalRuleFile(event.target.files?.[0] ?? null)
+                    }
+                  />
+                </Field>
+                <Field label='向量特殊规则（标准 JSON）'>
+                  <Input
+                    type='file'
+                    accept='.json'
+                    onChange={(event) =>
+                      setSpecialRuleFile(event.target.files?.[0] ?? null)
+                    }
+                  />
+                </Field>
+              </>
+            ) : (
+              <Field label='规则文件'>
+                <Input
+                  type='file'
+                  accept='.txt,.json'
+                  onChange={(event) =>
+                    setRuleFile(event.target.files?.[0] ?? null)
+                  }
+                />
+              </Field>
+            )}
             <Field label='分组 key 文件（可选）'>
               <Input
                 type='file'
                 accept='.xlsx'
-                onChange={(event) => setKeyFile(event.target.files?.[0] ?? null)}
+                onChange={(event) =>
+                  setKeyFile(event.target.files?.[0] ?? null)
+                }
               />
             </Field>
           </div>
@@ -285,14 +363,61 @@ export function ProviderCatalogImportSection() {
         </CardContent>
       </Card>
 
+      <Card>
+        <CardHeader>
+          <CardTitle>历史任务计费检查</CardTitle>
+          <CardDescription>
+            只生成受影响任务和差额报告，不会修改用户余额。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className='grid gap-3'>
+          <Button
+            type='button'
+            variant='outline'
+            disabled={auditLoading}
+            onClick={runBillingAudit}
+          >
+            {auditLoading ? '扫描中...' : '运行 dry-run 扫描'}
+          </Button>
+          {auditReport && (
+            <div className='grid gap-2 text-sm'>
+              <div>
+                扫描 {auditReport.scanned} 条，发现 {auditReport.affected}{' '}
+                条异常，额度差额 {auditReport.difference_quota}
+              </div>
+              {auditReport.rows.slice(0, 100).map((row) => (
+                <div
+                  key={row.task_id}
+                  className='grid gap-1 rounded-lg border p-3 md:grid-cols-4'
+                >
+                  <span>{row.model_name}</span>
+                  <span className='break-all'>{row.task_id}</span>
+                  <span>用户 #{row.user_id}</span>
+                  <span>
+                    实扣 {row.actual_quota} / 应扣 {row.expected_quota} / 差额{' '}
+                    {row.difference_quota}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       {message && (
         <div
           className={cn(
             'flex items-center gap-2 rounded-lg border px-3 py-2 text-sm',
-            report ? 'border-green-500/30 text-green-700' : 'border-red-500/30 text-red-700'
+            report
+              ? 'border-green-500/30 text-green-700'
+              : 'border-red-500/30 text-red-700'
           )}
         >
-          {report ? <CheckCircle2 className='size-4' /> : <AlertCircle className='size-4' />}
+          {report ? (
+            <CheckCircle2 className='size-4' />
+          ) : (
+            <AlertCircle className='size-4' />
+          )}
           {message}
         </div>
       )}
@@ -302,13 +427,7 @@ export function ProviderCatalogImportSection() {
   )
 }
 
-function Field({
-  label,
-  children,
-}: {
-  label: string
-  children: ReactNode
-}) {
+function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className='grid gap-1.5'>
       <Label>{label}</Label>
@@ -327,6 +446,7 @@ function ImportReportView({ report }: { report: ProviderCatalogReport }) {
     ['将创建渠道', report.channels_to_create],
     ['将替换渠道', report.channels_to_replace],
     ['特殊规则模型', report.special_pricing_models],
+    ['任务计费规则', report.task_billing_rules],
     ['托管标签前缀', report.managed_tag_prefix],
   ]
 
@@ -345,13 +465,36 @@ function ImportReportView({ report }: { report: ProviderCatalogReport }) {
           {items.map(([label, value]) => (
             <div key={label} className='rounded-lg border p-3'>
               <div className='text-muted-foreground text-xs'>{label}</div>
-              <div className='mt-1 break-all text-sm font-medium'>{value}</div>
+              <div className='mt-1 text-sm font-medium break-all'>{value}</div>
             </div>
           ))}
         </div>
 
-        <ReportList title='缺少 key 的分组' values={report.missing_key_groups} />
-        <ReportList title='会更新的 Option' values={report.changed_option_keys} />
+        <ReportList
+          title='缺少 key 的分组'
+          values={report.missing_key_groups}
+        />
+        <ReportList
+          title='会更新的 Option'
+          values={report.changed_option_keys}
+        />
+        <ReportList
+          title='源文件 SHA-256'
+          values={
+            report.source_hashes
+              ? Object.entries(report.source_hashes).map(
+                  ([name, hash]) => `${name}: ${hash}`
+                )
+              : []
+          }
+        />
+        {report.previous_source_hashes &&
+          Object.keys(report.previous_source_hashes).length > 0 && (
+            <div className='rounded-lg border p-3 text-sm'>
+              与上次导入版本：
+              {report.source_hashes_changed ? '文件内容有变化' : '文件内容相同'}
+            </div>
+          )}
         <ReportList
           title='跳过的特殊规则模型'
           values={report.skipped_special_models}
@@ -362,7 +505,10 @@ function ImportReportView({ report }: { report: ProviderCatalogReport }) {
             <div className='font-medium'>分组 key 文件错误</div>
             <div className='grid gap-2'>
               {report.invalid_rows.map((row) => (
-                <div key={`${row.row}-${row.field}`} className='rounded-lg border p-2 text-sm'>
+                <div
+                  key={`${row.row}-${row.field}`}
+                  className='rounded-lg border p-2 text-sm'
+                >
                   第 {row.row} 行 / {row.field}: {row.message}
                 </div>
               ))}
@@ -374,13 +520,7 @@ function ImportReportView({ report }: { report: ProviderCatalogReport }) {
   )
 }
 
-function ReportList({
-  title,
-  values,
-}: {
-  title: string
-  values?: string[]
-}) {
+function ReportList({ title, values }: { title: string; values?: string[] }) {
   if (!values || values.length === 0) {
     return null
   }

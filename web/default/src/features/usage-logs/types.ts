@@ -126,6 +126,11 @@ export interface LogOtherData {
   model_ratio?: number
   completion_ratio?: number
   model_price?: number
+  task_billing_mode?: 'per_call' | 'per_unit' | 'special'
+  task_billing_multiplier?: number
+  task_applied_ratios?: Record<string, number>
+  task_final_quota?: number
+  task_final_price?: number
   group_ratio?: number
   user_group_ratio?: number
   // Set by backend when the request was routed via the virtual auto group;
