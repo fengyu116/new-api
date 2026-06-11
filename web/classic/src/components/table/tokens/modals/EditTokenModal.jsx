@@ -34,6 +34,7 @@ import {
 } from '../../../../helpers/quota';
 import { useIsMobile } from '../../../../hooks/common/useIsMobile';
 import {
+  Banner,
   Button,
   SideSheet,
   Space,
@@ -68,8 +69,9 @@ const EditTokenModal = (props) => {
   const formApiRef = useRef(null);
   const [models, setModels] = useState([]);
   const [groups, setGroups] = useState([]);
-  const [autoGroupCandidates, setAutoGroupCandidates] = useState([]);
+  const [groupMeta, setGroupMeta] = useState({});
   const [showQuotaInput, setShowQuotaInput] = useState(false);
+  const originalGroupRef = useRef('');
   const isEdit = props.editingToken.id !== undefined;
 
   const getInitValues = () => ({
@@ -84,8 +86,26 @@ const EditTokenModal = (props) => {
     group: '',
     cross_group_retry: false,
     auto_groups: [],
+    auto_group_strategy: '',
     tokenCount: 1,
   });
+
+  // 计算保存时的实际分组：选了优先级=多分组路由(auto)；未选=跟随站点默认路由
+  // （旧 auto 令牌未选时保持站点 auto 链路，避免编辑动作悄悄改变语义）
+  const computeGroup = (selected) => {
+    if (
+      isEdit &&
+      originalGroupRef.current &&
+      originalGroupRef.current !== 'auto' &&
+      selected.length === 1 &&
+      selected[0] === originalGroupRef.current
+    ) {
+      return originalGroupRef.current;
+    }
+    if (selected.length > 0) return 'auto';
+    if (isEdit) return originalGroupRef.current === 'auto' ? 'auto' : '';
+    return statusState?.status?.default_use_auto_group ? 'auto' : '';
+  };
 
   const handleCancel = () => {
     props.handleClose();
@@ -140,28 +160,22 @@ const EditTokenModal = (props) => {
     let res = await API.get(`/api/user/self/groups`);
     const { success, message, data } = res.data;
     if (success) {
-      setAutoGroupCandidates(res.data.auto_groups || []);
-      let localGroupOptions = [
-        {
-          label: t('留空表示此令牌使用用户账号分组'),
-          value: '',
-          ratio: '',
-        },
-        ...Object.entries(data).map(([group, info]) => ({
+      // auto 为虚拟分组，由「分组优先级选择」是否选择分组来表达，不再作为候选项
+      const entries = Object.entries(data).filter(
+        ([group]) => group !== 'auto' && group !== '',
+      );
+      setGroups(
+        entries.map(([group, info]) => ({
           label: info.desc,
           value: group,
           ratio: info.ratio,
         })),
-      ];
-      if (statusState?.status?.default_use_auto_group) {
-        if (localGroupOptions.some((group) => group.value === 'auto')) {
-          localGroupOptions.sort((a, b) => (a.value === 'auto' ? -1 : 1));
-        }
+      );
+      const meta = {};
+      for (const [group, info] of entries) {
+        meta[group] = { desc: info.desc, ratio: info.ratio };
       }
-      setGroups(localGroupOptions);
-      // if (statusState?.status?.default_use_auto_group && formApiRef.current) {
-      //   formApiRef.current.setValue('group', 'auto');
-      // }
+      setGroupMeta(meta);
     } else {
       showError(t(message));
     }
@@ -190,6 +204,14 @@ const EditTokenModal = (props) => {
       if (!Array.isArray(data.auto_groups)) {
         data.auto_groups = [];
       }
+      originalGroupRef.current = data.group || '';
+      // 普通分组令牌在新 UI 中显示为单一优先级项
+      if (data.group && data.group !== 'auto') {
+        data.auto_groups = [data.group];
+      }
+      if (typeof data.auto_group_strategy !== 'string') {
+        data.auto_group_strategy = '';
+      }
       data.remain_amount = Number(
         quotaToDisplayAmount(data.remain_quota || 0).toFixed(6),
       );
@@ -217,6 +239,7 @@ const EditTokenModal = (props) => {
       if (isEdit) {
         loadToken();
       } else {
+        originalGroupRef.current = '';
         formApiRef.current?.setValues(getInitValues());
       }
     } else {
@@ -259,12 +282,16 @@ const EditTokenModal = (props) => {
       }
       localInputs.model_limits = localInputs.model_limits.join(',');
       localInputs.model_limits_enabled = localInputs.model_limits.length > 0;
-      localInputs.auto_groups =
-        localInputs.group === 'auto' &&
-        Array.isArray(localInputs.auto_groups) &&
-        localInputs.auto_groups.length > 0
-          ? JSON.stringify(localInputs.auto_groups)
-          : '';
+      {
+        const selectedGroups = Array.isArray(localInputs.auto_groups)
+          ? localInputs.auto_groups
+          : [];
+        localInputs.group = computeGroup(selectedGroups);
+        localInputs.auto_groups =
+          localInputs.group === 'auto' && selectedGroups.length > 0
+            ? JSON.stringify(selectedGroups)
+            : '';
+      }
       let res = await API.put(`/api/token/`, {
         ...localInputs,
         id: parseInt(props.editingToken.id),
@@ -309,12 +336,16 @@ const EditTokenModal = (props) => {
         }
         localInputs.model_limits = localInputs.model_limits.join(',');
         localInputs.model_limits_enabled = localInputs.model_limits.length > 0;
-        localInputs.auto_groups =
-          localInputs.group === 'auto' &&
-          Array.isArray(localInputs.auto_groups) &&
-          localInputs.auto_groups.length > 0
-            ? JSON.stringify(localInputs.auto_groups)
-            : '';
+        {
+          const selectedGroups = Array.isArray(localInputs.auto_groups)
+            ? localInputs.auto_groups
+            : [];
+          localInputs.group = computeGroup(selectedGroups);
+          localInputs.auto_groups =
+            localInputs.group === 'auto' && selectedGroups.length > 0
+              ? JSON.stringify(selectedGroups)
+              : '';
+        }
         let res = await API.post(`/api/token/`, localInputs);
         const { success, message } = res.data;
         if (success) {
@@ -416,11 +447,37 @@ const EditTokenModal = (props) => {
                     />
                   </Col>
                   <Col span={24}>
+                    <Form.RadioGroup
+                      field='auto_group_strategy'
+                      label={t('智能路由')}
+                      type='pureCard'
+                      direction='horizontal'
+                      initValue=''
+                    >
+                      <Form.Radio value='' extra={t('使用站点默认的选组策略')}>
+                        {t('跟随站点')}
+                      </Form.Radio>
+                      <Form.Radio
+                        value='cheapest'
+                        extra={t('优先选择倍率更低的分组')}
+                      >
+                        {t('价格优先')}
+                      </Form.Radio>
+                      <Form.Radio
+                        value='order'
+                        extra={t('严格按下方优先级顺序路由')}
+                      >
+                        {t('按选择顺序')}
+                      </Form.Radio>
+                    </Form.RadioGroup>
+                  </Col>
+                  <Col span={24}>
                     {groups.length > 0 ? (
                       <Form.Select
-                        field='group'
-                        label={t('令牌分组')}
-                        placeholder={t('跟随用户账号分组')}
+                        field='auto_groups'
+                        label={t('分组优先级选择')}
+                        placeholder={t('未选择时跟随站点默认路由')}
+                        multiple
                         optionList={groups}
                         renderOptionItem={renderGroupOption}
                         filter={(input, option) => {
@@ -433,51 +490,60 @@ const EditTokenModal = (props) => {
                         }}
                         showClear
                         style={{ width: '100%' }}
+                        extraText={t(
+                          '选择顺序决定分组优先级；未选择时使用站点默认路由',
+                        )}
                       />
                     ) : (
                       <Form.Select
                         placeholder={t('管理员未设置用户可选分组')}
                         disabled
-                        label={t('令牌分组')}
+                        label={t('分组优先级选择')}
                         style={{ width: '100%' }}
                       />
                     )}
                   </Col>
-                  <Col
-                    span={24}
-                    style={{
-                      display: values.group === 'auto' ? 'block' : 'none',
-                    }}
-                  >
-                    <Form.Switch
-                      field='cross_group_retry'
-                      label={t('跨分组重试')}
-                      size='default'
-                      extraText={t(
-                        '开启后，当前分组渠道失败时会按顺序尝试下一个分组的渠道',
-                      )}
-                    />
-                  </Col>
-                  {values.group === 'auto' && autoGroupCandidates.length > 0 && (
-                    <Col span={24}>
-                      <Form.Slot
-                        label={t('自定义 auto 分组顺序')}
-                        extraText={t(
-                          'auto 路由按此顺序尝试分组，留空则使用全局策略',
-                        )}
-                      >
-                        <AutoGroupOrderList
-                          candidates={autoGroupCandidates}
-                          value={
-                            Array.isArray(values.auto_groups)
-                              ? values.auto_groups
-                              : []
-                          }
-                          onChange={(next) =>
-                            formApiRef.current?.setValue('auto_groups', next)
-                          }
+                  {(!Array.isArray(values.auto_groups) ||
+                    values.auto_groups.length === 0) &&
+                    originalGroupRef.current === 'auto' && (
+                      <Col span={24}>
+                        <Banner
+                          type='info'
+                          closeIcon={null}
+                          description={t(
+                            '当前为站点 auto 链路：在全部候选分组中按策略路由；选择分组后改为按你的优先级路由',
+                          )}
                         />
-                      </Form.Slot>
+                      </Col>
+                    )}
+                  {Array.isArray(values.auto_groups) &&
+                    values.auto_groups.length > 0 && (
+                      <Col span={24}>
+                        <Form.Slot label={t('当前优先级顺序')}>
+                          <AutoGroupOrderList
+                            value={values.auto_groups}
+                            meta={groupMeta}
+                            onChange={(next) =>
+                              formApiRef.current?.setValue('auto_groups', next)
+                            }
+                          />
+                        </Form.Slot>
+                      </Col>
+                    )}
+                  {((Array.isArray(values.auto_groups) &&
+                    values.auto_groups.length > 1) ||
+                    (originalGroupRef.current === 'auto' &&
+                      (!Array.isArray(values.auto_groups) ||
+                        values.auto_groups.length === 0))) && (
+                    <Col span={24}>
+                      <Form.Switch
+                        field='cross_group_retry'
+                        label={t('跨分组重试')}
+                        size='default'
+                        extraText={t(
+                          '开启后，当前分组渠道失败时会按顺序尝试下一个分组的渠道',
+                        )}
+                      />
                     </Col>
                   )}
                   <Col xs={24} sm={24} md={24} lg={10} xl={10}>
@@ -607,7 +673,10 @@ const EditTokenModal = (props) => {
                         ? `▾ ${t('收起原生额度输入')}`
                         : `▸ ${t('使用原生额度输入')}`}
                     </div>
-                    <div style={{ display: showQuotaInput ? 'block' : 'none' }} className='mt-2'>
+                    <div
+                      style={{ display: showQuotaInput ? 'block' : 'none' }}
+                      className='mt-2'
+                    >
                       <Form.InputNumber
                         field='remain_quota'
                         label={t('额度')}

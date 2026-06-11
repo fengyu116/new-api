@@ -18,93 +18,96 @@ For commercial licensing, please contact support@quantumnous.com
 */
 
 import React from 'react';
-import { Button, Space, Tag, Typography } from '@douyinfe/semi-ui';
-import {
-  IconArrowUp,
-  IconArrowDown,
-  IconClose,
-  IconPlus,
-} from '@douyinfe/semi-icons';
+import { Button, Tag, Typography } from '@douyinfe/semi-ui';
+import { IconArrowUp, IconArrowDown, IconClose } from '@douyinfe/semi-icons';
 import { useTranslation } from 'react-i18next';
 
 const { Text } = Typography;
 
 /**
- * 令牌级自定义 auto 候选分组顺序控件（二开新增）。
- * value 为有序数组；candidates 为后端下发的可选 auto 分组。
- * 留空表示使用全局策略顺序。
+ * 令牌分组优先级顺序列表（二开新增）。
+ * value 为有序分组名数组；meta 为分组名到 { desc, ratio } 的映射。
+ * 与上方的分组多选联动，仅负责调序与移除。
  */
-const AutoGroupOrderList = ({ candidates = [], value = [], onChange }) => {
+const AutoGroupOrderList = ({ value = [], meta = {}, onChange }) => {
   const { t } = useTranslation();
-  const selected = value.filter((g) => candidates.includes(g));
-  const remaining = candidates.filter((g) => !selected.includes(g));
 
   const move = (index, delta) => {
-    const next = [...selected];
+    const next = [...value];
     const target = index + delta;
     if (target < 0 || target >= next.length) return;
     [next[index], next[target]] = [next[target], next[index]];
     onChange(next);
   };
 
+  if (value.length === 0) {
+    return null;
+  }
+
   return (
     <div className='flex flex-col gap-2'>
-      {selected.map((group, index) => (
-        <div
-          key={group}
-          className='flex items-center gap-2 rounded-lg px-2 py-1'
-          style={{
-            background: 'var(--semi-color-fill-0)',
-            border: '1px solid var(--semi-color-border)',
-          }}
-        >
-          <Text type='tertiary' size='small' style={{ width: 18 }}>
-            {index + 1}.
-          </Text>
-          <Text className='flex-1' ellipsis={{ showTooltip: true }}>
-            {group}
-          </Text>
-          <Button
-            theme='borderless'
-            type='tertiary'
-            size='small'
-            icon={<IconArrowUp />}
-            disabled={index === 0}
-            onClick={() => move(index, -1)}
-          />
-          <Button
-            theme='borderless'
-            type='tertiary'
-            size='small'
-            icon={<IconArrowDown />}
-            disabled={index === selected.length - 1}
-            onClick={() => move(index, 1)}
-          />
-          <Button
-            theme='borderless'
-            type='danger'
-            size='small'
-            icon={<IconClose />}
-            onClick={() => onChange(selected.filter((g) => g !== group))}
-          />
-        </div>
-      ))}
-      {remaining.length > 0 && (
-        <Space wrap>
-          {remaining.map((group) => (
-            <Tag
-              key={group}
-              color='white'
-              type='ghost'
-              className='cursor-pointer'
-              prefixIcon={<IconPlus size='small' />}
-              onClick={() => onChange([...selected, group])}
-            >
-              {group}
+      {value.map((group, index) => {
+        const info = meta[group] || {};
+        return (
+          <div
+            key={group}
+            className='flex items-center gap-2 rounded-lg px-2 py-1.5'
+            style={{
+              background: 'var(--semi-color-fill-0)',
+              border: '1px solid var(--semi-color-border)',
+            }}
+          >
+            <Tag size='small' color='blue' className='shrink-0'>
+              {t('优先级')} {index + 1}
             </Tag>
-          ))}
-        </Space>
-      )}
+            <Text strong className='shrink-0'>
+              {group}
+            </Text>
+            {info.desc && info.desc !== group && (
+              <Text
+                type='tertiary'
+                size='small'
+                className='flex-1 min-w-0'
+                ellipsis={{ showTooltip: true }}
+              >
+                {info.desc}
+              </Text>
+            )}
+            {(info.desc === undefined || info.desc === group) && (
+              <span className='flex-1' />
+            )}
+            {info.ratio !== undefined && info.ratio !== '' && (
+              <Tag size='small' color='green' className='shrink-0'>
+                {info.ratio}
+                {t('倍')}
+              </Tag>
+            )}
+            <Button
+              theme='borderless'
+              type='tertiary'
+              size='small'
+              icon={<IconArrowUp />}
+              disabled={index === 0}
+              onClick={() => move(index, -1)}
+            />
+            <Button
+              theme='borderless'
+              type='tertiary'
+              size='small'
+              icon={<IconArrowDown />}
+              disabled={index === value.length - 1}
+              onClick={() => move(index, 1)}
+            />
+            <Button
+              theme='borderless'
+              type='danger'
+              size='small'
+              icon={<IconClose />}
+              onClick={() => onChange(value.filter((g) => g !== group))}
+            />
+          </div>
+        );
+      })}
     </div>
   );
 };
