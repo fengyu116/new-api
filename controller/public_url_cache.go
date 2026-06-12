@@ -65,7 +65,10 @@ func ServePublicURLCacheAsset(c *gin.Context) {
 		})
 		return
 	}
-	c.Header("Cache-Control", "public, max-age=3600")
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	c.Header("CDN-Cache-Control", "no-store")
+	c.Header("Cloudflare-CDN-Cache-Control", "no-store")
+	c.Header("Pragma", "no-cache")
 	c.Header("Content-Type", mimeType)
 	c.File(objectPath)
 }
