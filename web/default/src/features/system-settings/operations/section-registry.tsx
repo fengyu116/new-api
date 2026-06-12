@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { SystemBehaviorSection } from '../general/system-behavior-section'
 import { EmailSettingsSection } from '../integrations/email-settings-section'
 import { MonitoringSettingsSection } from '../integrations/monitoring-settings-section'
+import { PublicUrlCacheSettingsSection } from '../integrations/public-url-cache-settings-section'
 import { WorkerSettingsSection } from '../integrations/worker-settings-section'
 import { LogSettingsSection } from '../maintenance/log-settings-section'
 import { PerformanceSection } from '../maintenance/performance-section'
@@ -90,6 +91,23 @@ const OPERATIONS_SECTIONS = [
           WorkerValidKey: settings.WorkerValidKey,
           WorkerAllowHttpImageRequestEnabled:
             settings.WorkerAllowHttpImageRequestEnabled,
+        }}
+      />
+    ),
+  },
+  {
+    id: 'public-url-cache',
+    titleKey: 'Public URL Cache',
+    build: (settings: OperationsSettings) => (
+      <PublicUrlCacheSettingsSection
+        defaultValues={{
+          PublicUrlCacheEnabled: settings.PublicUrlCacheEnabled,
+          PublicUrlCacheProvider: settings.PublicUrlCacheProvider,
+          PublicUrlCachePrefix: settings.PublicUrlCachePrefix,
+          PublicUrlCacheTTLSeconds: settings.PublicUrlCacheTTLSeconds,
+          PublicUrlCacheMaxImageMB: settings.PublicUrlCacheMaxImageMB,
+          PublicUrlCacheLocalPath: settings.PublicUrlCacheLocalPath,
+          PublicUrlCachePublicBaseURL: settings.PublicUrlCachePublicBaseURL,
         }}
       />
     ),

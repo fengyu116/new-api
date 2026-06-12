@@ -38,6 +38,13 @@ func InitOptionMap() {
 	common.OptionMap["FileDownloadPermission"] = strconv.Itoa(common.FileDownloadPermission)
 	common.OptionMap["ImageUploadPermission"] = strconv.Itoa(common.ImageUploadPermission)
 	common.OptionMap["ImageDownloadPermission"] = strconv.Itoa(common.ImageDownloadPermission)
+	common.OptionMap["PublicUrlCacheEnabled"] = "false"
+	common.OptionMap["PublicUrlCacheProvider"] = "local"
+	common.OptionMap["PublicUrlCachePrefix"] = "toonflow-refs"
+	common.OptionMap["PublicUrlCacheTTLSeconds"] = "3600"
+	common.OptionMap["PublicUrlCacheMaxImageMB"] = "10"
+	common.OptionMap["PublicUrlCacheLocalPath"] = "data/public-url-cache"
+	common.OptionMap["PublicUrlCachePublicBaseURL"] = ""
 	common.OptionMap["PasswordLoginEnabled"] = strconv.FormatBool(common.PasswordLoginEnabled)
 	common.OptionMap["PasswordRegisterEnabled"] = strconv.FormatBool(common.PasswordRegisterEnabled)
 	common.OptionMap["EmailVerificationEnabled"] = strconv.FormatBool(common.EmailVerificationEnabled)
