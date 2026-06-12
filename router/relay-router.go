@@ -15,7 +15,6 @@ func SetRelayRouter(router *gin.Engine) {
 	router.Use(middleware.DecompressRequestMiddleware())
 	router.Use(middleware.BodyStorageCleanup()) // 清理请求体存储
 	router.Use(middleware.StatsMiddleware())
-	router.GET("/public-url-cache/*object_key", controller.ServePublicURLCacheAsset)
 	// https://platform.openai.com/docs/api-reference/introduction
 	modelsRouter := router.Group("/v1/models")
 	modelsRouter.Use(middleware.RouteTag("relay"))
@@ -79,11 +78,6 @@ func SetRelayRouter(router *gin.Engine) {
 		wsRouter.GET("/realtime", func(c *gin.Context) {
 			controller.Relay(c, types.RelayFormatOpenAIRealtime)
 		})
-	}
-	{
-		assetRouter := relayV1Router.Group("/assets")
-		assetRouter.POST("/public-url-cache", controller.CreatePublicURLCache)
-		assetRouter.POST("/public-url-cache/release", controller.ReleasePublicURLCache)
 	}
 	{
 		//http router
