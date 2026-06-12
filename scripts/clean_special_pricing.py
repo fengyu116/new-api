@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import tempfile
+from copy import deepcopy
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -18,6 +19,7 @@ from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUT = SCRIPT_DIR.parent.parent / "向量特殊规则.txt"
+DEFAULT_NORMAL = SCRIPT_DIR.parent.parent / "向量普通规则.txt"
 DEFAULT_OUTPUT = SCRIPT_DIR.parent / "tmp" / "special-clean" / "SpecialModelPricing.cleaned.json"
 DEFAULT_REPORT = SCRIPT_DIR.parent / "tmp" / "special-clean" / "SpecialModelPricing.report.json"
 
@@ -59,6 +61,35 @@ def read_utf8(path: Path) -> str:
     if not text.strip():
         raise ValueError(f"输入文件为空: {path}")
     return text
+
+
+def read_normal_model_names(path: Path | None) -> set[str] | None:
+    if path is None:
+        return None
+    if not path.exists():
+        return None
+    text = read_utf8(path)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"普通规则不是有效 JSON: {path}: {exc}") from exc
+    names: set[str] = set()
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            model_name = value.get("model_name")
+            if isinstance(model_name, str) and model_name.strip():
+                names.add(model_name.strip())
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(payload)
+    if not names:
+        raise ValueError(f"普通规则没有发现 model_name: {path}")
+    return names
 
 
 def discover_special_models(source: str) -> set[str]:
@@ -229,7 +260,15 @@ def build_special_pricing(discovered_models: set[str], credit_unit_price: Decima
         if model_name in discovered_models and model_name not in models:
             rule["credit_unit_price"] = float(credit_unit_price)
             models[model_name] = rule
+    _copy_alias_rule(models, discovered_models, "gemini-3-pro-image-preview", "gemini-3-pro-image")
+    _copy_alias_rule(models, discovered_models, "gemini-3.1-flash-image-preview", "gemini-3.1-flash-image")
     return document
+
+
+def _copy_alias_rule(models: dict[str, Any], discovered: set[str], source_name: str, alias_name: str) -> None:
+    if alias_name not in discovered or alias_name in models or source_name not in models:
+        return
+    models[alias_name] = deepcopy(models[source_name])
 
 
 def _set_minimum_price(rule: dict[str, Any]) -> None:
@@ -350,12 +389,15 @@ def atomic_write_json(path: Path, value: Any) -> None:
 def clean_special_pricing(
     *,
     input_path: Path,
+    normal_path: Path | None = DEFAULT_NORMAL,
     output_path: Path,
     report_path: Path,
     credit_unit_price: Decimal = Decimal("0.05"),
 ) -> CleanResult:
     errors: list[str] = []
+    raw_discovered: set[str] = set()
     discovered: set[str] = set()
+    filtered_out: set[str] = set()
     generated: set[str] = set()
     source_hash = ""
     document: dict[str, Any] | None = None
@@ -363,7 +405,12 @@ def clean_special_pricing(
     try:
         source = read_utf8(input_path)
         source_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
-        discovered = discover_special_models(source)
+        raw_discovered = discover_special_models(source)
+        discovered = set(raw_discovered)
+        normal_models = read_normal_model_names(normal_path)
+        if normal_models is not None:
+            filtered_out = discovered - normal_models
+            discovered.intersection_update(normal_models)
         if not discovered:
             errors.append("没有发现任何特殊模型分支")
         document = build_special_pricing(discovered, credit_unit_price)
@@ -380,9 +427,12 @@ def clean_special_pricing(
         "output": str(output_path.resolve()),
         "source_sha256": source_hash,
         "credit_unit_price": str(credit_unit_price),
+        "raw_discovered_count": len(raw_discovered),
         "discovered_count": len(discovered),
         "generated_count": len(generated),
+        "raw_discovered_models": sorted(raw_discovered),
         "discovered_models": sorted(discovered),
+        "filtered_out_models": sorted(filtered_out),
         "generated_models": sorted(generated),
         "uncovered_models": sorted(uncovered),
         "errors": errors,
@@ -405,6 +455,12 @@ def parse_args() -> argparse.Namespace:
         description="严格清洗供应商压缩 JS 特殊规则为 SpecialModelPricing JSON。"
     )
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
+    parser.add_argument("--normal", type=Path, default=DEFAULT_NORMAL)
+    parser.add_argument(
+        "--no-normal-filter",
+        action="store_true",
+        help="不按普通规则 model_name 过滤特殊规则；仅用于调试完整特殊源码覆盖。",
+    )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
     parser.add_argument("--credit-unit-price", type=Decimal, default=Decimal("0.05"))
@@ -415,6 +471,7 @@ def main() -> int:
     args = parse_args()
     result = clean_special_pricing(
         input_path=args.input,
+        normal_path=None if args.no_normal_filter else args.normal,
         output_path=args.output,
         report_path=args.report,
         credit_unit_price=args.credit_unit_price,
