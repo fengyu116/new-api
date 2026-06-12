@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/task_billing_rules"
 )
 
@@ -86,6 +87,9 @@ func ParseVectorBundle(req VectorBundleRequest) (*ProviderCatalog, error) {
 	if len(req.SpecialContent) > 0 {
 		catalog.SourceHashes["special"] = fmt.Sprintf("%x", sha256.Sum256(req.SpecialContent))
 	}
+	if len(req.RemotePricingContent) > 0 {
+		AttachVectorRemotePricingValidation(catalog, req.RemotePricingContent)
+	}
 	return catalog, nil
 }
 
@@ -97,6 +101,9 @@ func specialPricingModels(value map[string]any) map[string]any {
 }
 
 func isSpecialCatalogModel(item CatalogModel) bool {
+	if item.QuotaType == 4 {
+		return true
+	}
 	_, ok := vectorSpecialModelNames[item.Name]
 	return ok
 }
@@ -233,22 +240,23 @@ type vectorNormalFile struct {
 }
 
 type vectorNormalModel struct {
-	ModelName              string   `json:"model_name"`
-	Description            string   `json:"description"`
-	Tags                   string   `json:"tags"`
-	ModelType              string   `json:"model_type"`
-	VendorID               int      `json:"vendor_id"`
-	QuotaType              int      `json:"quota_type"`
-	ModelRatio             float64  `json:"model_ratio"`
-	ModelPrice             float64  `json:"model_price"`
-	OwnerBy                string   `json:"owner_by"`
-	CompletionRatio        float64  `json:"completion_ratio"`
-	CacheRatio             *float64 `json:"cache_ratio"`
-	CreateCacheRatio       *float64 `json:"create_cache_ratio"`
-	AudioCompletionRatio   *float64 `json:"audio_completion_ratio"`
-	EnableGroups           []string `json:"enable_groups"`
-	SupportedEndpointTypes []string `json:"supported_endpoint_types"`
-	SortOrder              int      `json:"sort_order"`
+	ModelName              string      `json:"model_name"`
+	Description            string      `json:"description"`
+	Tags                   string      `json:"tags"`
+	ModelType              string      `json:"model_type"`
+	VendorID               int         `json:"vendor_id"`
+	QuotaType              int         `json:"quota_type"`
+	ModelRatio             float64     `json:"model_ratio"`
+	ModelPrice             float64     `json:"model_price"`
+	OwnerBy                string      `json:"owner_by"`
+	CompletionRatio        float64     `json:"completion_ratio"`
+	CacheRatio             *float64    `json:"cache_ratio"`
+	CreateCacheRatio       *float64    `json:"create_cache_ratio"`
+	AudioCompletionRatio   *float64    `json:"audio_completion_ratio"`
+	EnableGroups           []string    `json:"enable_groups"`
+	SupportedEndpointTypes []string    `json:"supported_endpoint_types"`
+	SortOrder              int         `json:"sort_order"`
+	StepRatios             []StepRatio `json:"step_ratios"`
 }
 
 func parseVectorNormal(req ParseRequest) (*ProviderCatalog, error) {
@@ -264,6 +272,8 @@ func parseVectorNormal(req ParseRequest) (*ProviderCatalog, error) {
 		Vendors:      raw.Vendors,
 		Groups:       raw.UsableGroup,
 		GroupRatios:  raw.GroupRatio,
+		BillingModes: map[string]string{},
+		BillingExprs: map[string]string{},
 	}
 	for _, row := range raw.Data {
 		if strings.TrimSpace(row.ModelName) == "" {
@@ -291,12 +301,103 @@ func parseVectorNormal(req ParseRequest) (*ProviderCatalog, error) {
 			EnableGroups:           uniqueStrings(row.EnableGroups),
 			SupportedEndpointTypes: uniqueStrings(row.SupportedEndpointTypes),
 			SortOrder:              row.SortOrder,
+			StepRatios:             row.StepRatios,
 			EndpointMap:            endpointMap,
+		}
+		if len(model.StepRatios) > 0 {
+			expr, err := compileStepRatios(model)
+			if err != nil {
+				return nil, fmt.Errorf("模型 %s 阶梯价格无法转换: %w", model.Name, err)
+			}
+			catalog.BillingModes[model.Name] = billing_setting.BillingModeTieredExpr
+			catalog.BillingExprs[model.Name] = expr
 		}
 		model.ChannelType = channelTypeForModel(model)
 		catalog.Models = append(catalog.Models, model)
 	}
 	return catalog, nil
+}
+
+func compileStepRatios(model CatalogModel) (string, error) {
+	if model.ModelRatio <= 0 || model.CompletionRatio <= 0 {
+		return "", fmt.Errorf("token 阶梯模型缺少 model_ratio 或 completion_ratio")
+	}
+	steps := append([]StepRatio(nil), model.StepRatios...)
+	sort.SliceStable(steps, func(i, j int) bool {
+		if steps[i].StepSize == steps[j].StepSize {
+			return steps[i].CompletionStepSize < steps[j].CompletionStepSize
+		}
+		return steps[i].StepSize < steps[j].StepSize
+	})
+	baseInput := model.ModelRatio * 2
+	branches := make([]string, 0, len(steps))
+	for index, step := range steps {
+		if step.StepSize <= 0 || step.PromptStepRatio <= 0 || step.CompletionStepRatio <= 0 {
+			return "", fmt.Errorf("第 %d 档包含无效倍率或阈值", index+1)
+		}
+		normalBody := tierBody(
+			baseInput*step.PromptStepRatio,
+			baseInput*model.CompletionRatio*step.CompletionStepRatio,
+			cacheTierPrice(baseInput, model.CacheRatio, step.CacheStepRatio, step.PromptStepRatio),
+		)
+		body := normalBody
+		if step.PromptThinkingStepRatio > 0 || step.CompletionThinkingStepRatio > 0 {
+			thinkingPrompt := step.PromptThinkingStepRatio
+			if thinkingPrompt <= 0 {
+				thinkingPrompt = step.PromptStepRatio
+			}
+			thinkingCompletion := step.CompletionThinkingStepRatio
+			if thinkingCompletion <= 0 {
+				thinkingCompletion = step.CompletionStepRatio
+			}
+			thinkingBody := tierBody(
+				baseInput*thinkingPrompt,
+				baseInput*model.CompletionRatio*thinkingCompletion,
+				cacheTierPrice(baseInput, model.CacheRatio, step.CacheStepRatio, thinkingPrompt),
+			)
+			body = fmt.Sprintf(`param("enable_thinking") == false ? (%s) : (%s)`, normalBody, thinkingBody)
+		}
+		tierExpr := fmt.Sprintf(`tier("tier_%d", %s)`, index+1, body)
+		if index < len(steps)-1 {
+			condition := fmt.Sprintf("len <= %d", step.StepSize)
+			if step.CompletionStepSize > 0 {
+				condition += fmt.Sprintf(" && c <= %d", step.CompletionStepSize)
+			}
+			branches = append(branches, condition+" ? "+tierExpr+" : ")
+		} else {
+			branches = append(branches, tierExpr)
+		}
+	}
+	expr := strings.Join(branches, "")
+	if err := billing_setting.SmokeTestExpr(expr); err != nil {
+		return "", err
+	}
+	return expr, nil
+}
+
+func tierBody(inputPrice, outputPrice, cachePrice float64) string {
+	parts := []string{
+		"p * " + formatPrice(inputPrice),
+		"c * " + formatPrice(outputPrice),
+	}
+	if cachePrice > 0 {
+		parts = append(parts, "cr * "+formatPrice(cachePrice))
+	}
+	return strings.Join(parts, " + ")
+}
+
+func cacheTierPrice(baseInput float64, cacheRatio *float64, cacheStepRatio, promptStepRatio float64) float64 {
+	if cacheRatio == nil || *cacheRatio <= 0 {
+		return 0
+	}
+	if cacheStepRatio <= 0 {
+		cacheStepRatio = promptStepRatio
+	}
+	return baseInput * *cacheRatio * cacheStepRatio
+}
+
+func formatPrice(value float64) string {
+	return strconv.FormatFloat(value, 'f', -1, 64)
 }
 
 func parseVectorSpecial(req ParseRequest) (*ProviderCatalog, error) {

@@ -1,18 +1,24 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/catalogimport"
 
 	"github.com/gin-gonic/gin"
 )
 
 const providerCatalogApplyConfirm = "APPLY_PROVIDER_CATALOG"
+
+var fetchVectorRemotePricing = func(ctx context.Context, baseURL string) ([]byte, error) {
+	return catalogimport.FetchVectorRemotePricing(ctx, service.GetHttpClient(), baseURL)
+}
 
 func ProviderCatalogPreview(c *gin.Context) {
 	req, err := buildProviderCatalogImportRequest(c, false)
@@ -21,7 +27,7 @@ func ProviderCatalogPreview(c *gin.Context) {
 		return
 	}
 	report, err := catalogimport.DryRun(req)
-	if err != nil && len(report.InvalidRows) == 0 {
+	if err != nil && len(report.InvalidRows) == 0 && len(report.BlockedReasons) == 0 {
 		common.ApiError(c, err)
 		return
 	}
@@ -82,12 +88,17 @@ func buildProviderCatalogImportRequest(c *gin.Context, apply bool) (catalogimpor
 		if readErr != nil {
 			return catalogimport.ImportRequest{}, readErr
 		}
+		remotePricingContent, fetchErr := fetchVectorRemotePricing(c.Request.Context(), baseURL)
+		if fetchErr != nil {
+			return catalogimport.ImportRequest{}, fmt.Errorf("向量远端价格校验失败: %w", fetchErr)
+		}
 		catalog, err = catalogimport.ParseVectorBundle(catalogimport.VectorBundleRequest{
-			ProviderCode:   providerCode,
-			ProviderName:   providerName,
-			BaseURL:        baseURL,
-			NormalContent:  normalContent,
-			SpecialContent: specialContent,
+			ProviderCode:         providerCode,
+			ProviderName:         providerName,
+			BaseURL:              baseURL,
+			NormalContent:        normalContent,
+			SpecialContent:       specialContent,
+			RemotePricingContent: remotePricingContent,
 		})
 	} else {
 		ruleField := "rule_file"
@@ -108,6 +119,13 @@ func buildProviderCatalogImportRequest(c *gin.Context, apply bool) (catalogimpor
 			BaseURL:      baseURL,
 			Content:      ruleContent,
 		})
+		if err == nil && providerCode == "vector" && ruleType == catalogimport.RuleTypeVectorNormal {
+			remotePricingContent, fetchErr := fetchVectorRemotePricing(c.Request.Context(), baseURL)
+			if fetchErr != nil {
+				return catalogimport.ImportRequest{}, fmt.Errorf("向量远端价格校验失败: %w", fetchErr)
+			}
+			catalogimport.AttachVectorRemotePricingValidation(catalog, remotePricingContent)
+		}
 	}
 	if err != nil {
 		return catalogimport.ImportRequest{}, err

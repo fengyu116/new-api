@@ -38,7 +38,18 @@ type CatalogModel struct {
 	ParamOverride          map[string]any    `json:"param_override,omitempty"`
 	EndpointMap            map[string]any    `json:"endpoint_map,omitempty"`
 	ChannelType            int               `json:"channel_type,omitempty"`
+	StepRatios             []StepRatio       `json:"step_ratios,omitempty"`
 	Extra                  map[string]any    `json:"extra,omitempty"`
+}
+
+type StepRatio struct {
+	StepSize                    int     `json:"step_size"`
+	CompletionStepSize          int     `json:"completion_step_size"`
+	PromptStepRatio             float64 `json:"prompt_step_ratio"`
+	CompletionStepRatio         float64 `json:"completion_step_ratio"`
+	CacheStepRatio              float64 `json:"cache_step_ratio"`
+	PromptThinkingStepRatio     float64 `json:"prompt_thinking_step_ratio"`
+	CompletionThinkingStepRatio float64 `json:"completion_thinking_step_ratio"`
 }
 
 type ProviderCatalog struct {
@@ -52,17 +63,36 @@ type ProviderCatalog struct {
 	Models               []CatalogModel                     `json:"models,omitempty"`
 	SpecialPricing       map[string]any                     `json:"special_pricing,omitempty"`
 	TaskBillingRules     map[string]task_billing_rules.Rule `json:"task_billing_rules,omitempty"`
+	BillingModes         map[string]string                  `json:"billing_modes,omitempty"`
+	BillingExprs         map[string]string                  `json:"billing_exprs,omitempty"`
+	RemotePricingReport  *RemotePricingReport               `json:"remote_pricing_report,omitempty"`
+	ValidationErrors     []string                           `json:"validation_errors,omitempty"`
 	SourceHashes         map[string]string                  `json:"source_hashes,omitempty"`
 	SpecialOnly          bool                               `json:"-"`
 	SkippedSpecialModels []string                           `json:"-"`
 }
 
 type VectorBundleRequest struct {
-	ProviderCode   string
-	ProviderName   string
-	BaseURL        string
-	NormalContent  []byte
-	SpecialContent []byte
+	ProviderCode         string
+	ProviderName         string
+	BaseURL              string
+	NormalContent        []byte
+	SpecialContent       []byte
+	RemotePricingContent []byte
+}
+
+type RemotePricingMismatch struct {
+	ModelName string `json:"model_name,omitempty"`
+	Group     string `json:"group,omitempty"`
+	Field     string `json:"field"`
+	Local     any    `json:"local,omitempty"`
+	Remote    any    `json:"remote,omitempty"`
+}
+
+type RemotePricingReport struct {
+	CheckedModels int                     `json:"checked_models"`
+	Mismatches    []RemotePricingMismatch `json:"mismatches,omitempty"`
+	RemoteOnly    []string                `json:"remote_only_models,omitempty"`
 }
 
 type TokenRow struct {

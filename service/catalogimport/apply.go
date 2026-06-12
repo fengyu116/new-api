@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/setting/special_pricing"
 	"github.com/QuantumNous/new-api/setting/task_billing_rules"
@@ -42,10 +43,13 @@ type ImportReport struct {
 	InvalidRows          []GroupKeyReportError `json:"invalid_rows,omitempty"`
 	SpecialPricingModels int                   `json:"special_pricing_models"`
 	TaskBillingRules     int                   `json:"task_billing_rules"`
+	TieredBillingModels  int                   `json:"tiered_billing_models"`
+	RemotePricingReport  *RemotePricingReport  `json:"remote_pricing_report,omitempty"`
 	SourceHashes         map[string]string     `json:"source_hashes,omitempty"`
 	PreviousSourceHashes map[string]string     `json:"previous_source_hashes,omitempty"`
 	SourceHashesChanged  bool                  `json:"source_hashes_changed"`
 	SkippedSpecialModels []string              `json:"skipped_special_models,omitempty"`
+	BlockedReasons       []string              `json:"blocked_reasons,omitempty"`
 	ChangedOptionKeys    []string              `json:"changed_option_keys"`
 	ManagedTagPrefix     string                `json:"managed_tag_prefix"`
 	Applied              bool                  `json:"applied"`
@@ -68,6 +72,7 @@ type providerImportState struct {
 	SourceHashes         map[string]string `json:"source_hashes,omitempty"`
 	SpecialPricingModels []string          `json:"special_pricing_models,omitempty"`
 	TaskBillingModels    []string          `json:"task_billing_models,omitempty"`
+	TieredBillingModels  []string          `json:"tiered_billing_models,omitempty"`
 	AppliedAt            int64             `json:"applied_at"`
 }
 
@@ -177,9 +182,14 @@ func buildReport(req ImportRequest, preservedKeys map[string]string) (ImportRepo
 		ManagedTagPrefix:     prefix,
 		ChangedOptionKeys:    changedOptionKeys(req.Catalog),
 		SourceHashes:         req.Catalog.SourceHashes,
+		RemotePricingReport:  req.Catalog.RemotePricingReport,
 		PreviousSourceHashes: previousState.SourceHashes,
 		SourceHashesChanged:  hashesChanged(previousState.SourceHashes, req.Catalog.SourceHashes),
 		SkippedSpecialModels: append([]string(nil), req.Catalog.SkippedSpecialModels...),
+		BlockedReasons:       append([]string(nil), req.Catalog.ValidationErrors...),
+	}
+	if len(report.BlockedReasons) > 0 {
+		return report, fmt.Errorf("%s", strings.Join(report.BlockedReasons, "; "))
 	}
 	if keyErr != nil {
 		report.InvalidRows = keyReport.InvalidRows
@@ -214,6 +224,7 @@ func buildReport(req ImportRequest, preservedKeys map[string]string) (ImportRepo
 	report.MissingKeyGroups = sortedStructKeys(missing)
 	report.SpecialPricingModels = countSpecialPricingModels(req.Catalog.SpecialPricing)
 	report.TaskBillingRules = len(req.Catalog.TaskBillingRules)
+	report.TieredBillingModels = len(req.Catalog.BillingModes)
 	if req.Catalog.SpecialOnly {
 		if err := validateSpecialOnlyProviderScope(req.Catalog); err != nil {
 			return report, err
@@ -491,11 +502,24 @@ func buildOptionValues(catalog *ProviderCatalog) (map[string]string, error) {
 		}
 	}
 	for _, item := range catalog.Models {
-		if item.ModelPrice > 0 {
+		switch item.QuotaType {
+		case 0:
+			modelRatio[item.Name] = item.ModelRatio
+			delete(modelPrice, item.Name)
+		case 3:
+			modelRatio[item.Name] = item.ModelPrice / 2
+			delete(modelPrice, item.Name)
+		case 1, 2, 4:
 			modelPrice[item.Name] = item.ModelPrice
 			delete(modelRatio, item.Name)
-		} else {
-			modelRatio[item.Name] = item.ModelRatio
+		default:
+			if item.ModelPrice > 0 {
+				modelPrice[item.Name] = item.ModelPrice
+				delete(modelRatio, item.Name)
+			} else {
+				modelRatio[item.Name] = item.ModelRatio
+				delete(modelPrice, item.Name)
+			}
 		}
 		if item.CompletionRatio > 0 {
 			completionRatio[item.Name] = item.CompletionRatio
@@ -539,6 +563,25 @@ func buildOptionValues(catalog *ProviderCatalog) (map[string]string, error) {
 			return nil, err
 		}
 		values[task_billing_rules.OptionKey] = merged
+	}
+	if len(catalog.BillingModes) > 0 || len(previousState.TieredBillingModels) > 0 {
+		modes := billing_setting.GetBillingModeCopy()
+		expressions := billing_setting.GetBillingExprCopy()
+		for _, modelName := range previousState.TieredBillingModels {
+			delete(modes, modelName)
+			delete(expressions, modelName)
+		}
+		for modelName, mode := range catalog.BillingModes {
+			modes[modelName] = mode
+		}
+		for modelName, expr := range catalog.BillingExprs {
+			if err := billing_setting.SmokeTestExpr(expr); err != nil {
+				return nil, fmt.Errorf("模型 %s 阶梯表达式校验失败: %w", modelName, err)
+			}
+			expressions[modelName] = expr
+		}
+		values["billing_setting.billing_mode"] = mustJSON(modes)
+		values["billing_setting.billing_expr"] = mustJSON(expressions)
 	}
 	state := buildProviderImportState(catalog, previousState)
 	values[ProviderImportStateOptionKey(catalog.ProviderCode, catalog.BaseURL)] = mustJSON(state)
@@ -599,6 +642,7 @@ func buildProviderImportState(catalog *ProviderCatalog, previous providerImportS
 		SourceHashes:         catalog.SourceHashes,
 		SpecialPricingModels: sortedAnyKeys(specialPricingModels(catalog.SpecialPricing)),
 		TaskBillingModels:    sortedTaskRuleKeys(catalog.TaskBillingRules),
+		TieredBillingModels:  sortedStringKeys(catalog.BillingModes),
 		AppliedAt:            time.Now().Unix(),
 	}
 	if catalog.SpecialOnly {
@@ -621,6 +665,15 @@ func buildProviderImportState(catalog *ProviderCatalog, previous providerImportS
 		}
 	}
 	return state
+}
+
+func sortedStringKeys(values map[string]string) []string {
+	result := make([]string, 0, len(values))
+	for key := range values {
+		result = append(result, key)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func loadProviderImportState(providerCode, baseURL string) providerImportState {
@@ -1126,6 +1179,9 @@ func changedOptionKeys(catalog *ProviderCatalog) []string {
 	}
 	if len(catalog.TaskBillingRules) > 0 {
 		keys = append(keys, task_billing_rules.OptionKey)
+	}
+	if len(catalog.BillingModes) > 0 {
+		keys = append(keys, "billing_setting.billing_mode", "billing_setting.billing_expr")
 	}
 	keys = append(keys, ProviderImportStateOptionKey(catalog.ProviderCode, catalog.BaseURL))
 	return keys

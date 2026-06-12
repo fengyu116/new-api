@@ -63,7 +63,7 @@ def read_utf8(path: Path) -> str:
     return text
 
 
-def read_normal_model_names(path: Path | None) -> set[str] | None:
+def read_normal_models(path: Path | None) -> list[dict[str, Any]] | None:
     if path is None:
         return None
     if not path.exists():
@@ -73,23 +73,26 @@ def read_normal_model_names(path: Path | None) -> set[str] | None:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"普通规则不是有效 JSON: {path}: {exc}") from exc
-    names: set[str] = set()
-
-    def walk(value: Any) -> None:
-        if isinstance(value, dict):
-            model_name = value.get("model_name")
-            if isinstance(model_name, str) and model_name.strip():
-                names.add(model_name.strip())
-            for child in value.values():
-                walk(child)
-        elif isinstance(value, list):
-            for child in value:
-                walk(child)
-
-    walk(payload)
-    if not names:
+    rows = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError(f"普通规则缺少 data 数组: {path}")
+    models = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and isinstance(row.get("model_name"), str)
+        and row["model_name"].strip()
+    ]
+    if not models:
         raise ValueError(f"普通规则没有发现 model_name: {path}")
-    return names
+    return models
+
+
+def read_normal_model_names(path: Path | None) -> set[str] | None:
+    models = read_normal_models(path)
+    if models is None:
+        return None
+    return {str(item["model_name"]).strip() for item in models}
 
 
 def discover_special_models(source: str) -> set[str]:
@@ -114,6 +117,14 @@ def discover_special_models(source: str) -> set[str]:
 
     discovered.difference_update(NON_SPECIAL_DISPLAY_BRANCHES)
     return {name for name in discovered if _looks_like_model_name(name)}
+
+
+def _has_quota_type_four_branch(source: str) -> bool:
+    patterns = (
+        r"""4\s*[!=]==?\s*[A-Za-z_$][\w$?.]*quota_type""",
+        r"""[A-Za-z_$][\w$?.]*quota_type\s*[!=]==?\s*4""",
+    )
+    return any(re.search(pattern, source) for pattern in patterns)
 
 
 def _quoted_literal_present(source: str, value: str) -> bool:
@@ -243,7 +254,11 @@ def _source_only_rules() -> dict[str, dict[str, Any]]:
     }
 
 
-def build_special_pricing(discovered_models: set[str], credit_unit_price: Decimal) -> dict[str, Any]:
+def build_special_pricing(
+    discovered_models: set[str],
+    credit_unit_price: Decimal,
+    normal_models: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     catalog = _load_catalog_module()
     rows = [
         {
@@ -262,7 +277,194 @@ def build_special_pricing(discovered_models: set[str], credit_unit_price: Decima
             models[model_name] = rule
     _copy_alias_rule(models, discovered_models, "gemini-3-pro-image-preview", "gemini-3-pro-image")
     _copy_alias_rule(models, discovered_models, "gemini-3.1-flash-image-preview", "gemini-3.1-flash-image")
+    for item in normal_models or []:
+        model_name = str(item.get("model_name") or "").strip()
+        if model_name in discovered_models and item.get("quota_type") == 4:
+            models[model_name] = _quota_type_four_rule(item, credit_unit_price)
     return document
+
+
+def _quota_type_four_rule(item: dict[str, Any], credit_unit_price: Decimal) -> dict[str, Any]:
+    model_name = str(item.get("model_name") or "").strip()
+    base_price = _finite_number(item.get("model_price"))
+    if base_price is None or base_price <= 0:
+        raise ValueError(f"{model_name}: quota_type=4 缺少有效 model_price")
+    if model_name.startswith("happyhorse-1.0-"):
+        return _per_second_entries_rule(
+            model_name,
+            credit_unit_price,
+            "视频生成",
+            ["resolution"],
+            [
+                ("720p", "720P", base_price * 90),
+                ("1080p", "1080P", base_price * 160),
+            ],
+        )
+    if model_name in {"wan2.5-i2v-preview", "alibailian-video"}:
+        return _fixed_spec_rule(
+            model_name,
+            credit_unit_price,
+            "视频生成",
+            ["resolution", "duration"],
+            [
+                (f"{resolution}|{duration}", f"{resolution.upper()} / {duration}s", multiplier * base_price * duration)
+                for resolution, multiplier in (("480p", 0.3), ("720p", 0.6), ("1080p", 1.0))
+                for duration in (5, 10)
+            ],
+        )
+    if model_name == "wan2.6-i2v":
+        return _fixed_spec_rule(
+            model_name,
+            credit_unit_price,
+            "视频生成",
+            ["resolution", "duration"],
+            [
+                (f"{resolution}|{duration}", f"{resolution.upper()} / {duration}s", multiplier * base_price * duration)
+                for resolution, multiplier in (("720p", 0.6), ("1080p", 1.0))
+                for duration in (5, 10, 15)
+            ],
+        )
+    if model_name == "wan2.6-i2v-flash":
+        return _fixed_spec_rule(
+            model_name,
+            credit_unit_price,
+            "视频生成",
+            ["resolution", "duration", "with_audio"],
+            [
+                (
+                    f"{resolution}|{duration}|{audio_key}",
+                    f"{resolution.upper()} / {duration}s / {audio_label}",
+                    multiplier * base_price * audio_multiplier * duration,
+                )
+                for resolution, multiplier in (("720p", 0.6), ("1080p", 1.0))
+                for duration in (5, 10, 15)
+                for audio_key, audio_label, audio_multiplier in (
+                    ("audio", "有声", 1.0),
+                    ("no_audio", "无声", 0.5),
+                )
+            ],
+        )
+    if model_name == "kling-motion-control":
+        return _per_second_entries_rule(
+            model_name,
+            credit_unit_price,
+            "动作控制",
+            ["version", "mode"],
+            [
+                ("v2.6|std", "V2.6 / std (720P)", base_price),
+                ("v2.6|pro", "V2.6 / pro (1080P)", base_price * 1.6),
+                ("v3.0|std", "V3.0 / std (720P)", base_price * 1.8),
+                ("v3.0|pro", "V3.0 / pro (1080P)", base_price * 2.4),
+            ],
+        )
+    return _per_second_entries_rule(
+        model_name,
+        credit_unit_price,
+        "按时长计费",
+        ["value"],
+        [("default", "每秒", base_price)],
+        default_value="default",
+    )
+
+
+def _per_second_entries_rule(
+    model_name: str,
+    credit_unit_price: Decimal,
+    title: str,
+    key_fields: list[str],
+    specs: list[tuple[str, str, float]],
+    *,
+    default_value: str = "",
+) -> dict[str, Any]:
+    entries = [
+        {
+            "key": key,
+            "first_second_price": price,
+            "next_second_price": price,
+            "unit": "秒",
+        }
+        for key, _, price in specs
+    ]
+    rows = [
+        {
+            "description": label,
+            "first_second_price": price,
+            "next_second_price": price,
+            "price_text": f"¥{price:.4f} / 秒",
+            "unit": "秒",
+        }
+        for _, label, price in specs
+    ]
+    return {
+        "model_name": model_name,
+        "type": "entry_fields",
+        "credit_unit_price": float(credit_unit_price),
+        "billing_enabled": True,
+        "key_fields": key_fields,
+        "default_value": default_value,
+        "min_duration": 1,
+        "entries": entries,
+        "display": {
+            "title": title,
+            "unit": "秒",
+            "billing_enabled": True,
+            "sections": [
+                {
+                    "title": title,
+                    "unit": "秒",
+                    "columns": [
+                        {"key": "description", "title": "规格"},
+                        {"key": "price_text", "title": "价格"},
+                    ],
+                    "rows": rows,
+                }
+            ],
+        },
+    }
+
+
+def _fixed_spec_rule(
+    model_name: str,
+    credit_unit_price: Decimal,
+    title: str,
+    key_fields: list[str],
+    specs: list[tuple[str, str, float]],
+) -> dict[str, Any]:
+    return {
+        "model_name": model_name,
+        "type": "entry_fields",
+        "credit_unit_price": float(credit_unit_price),
+        "billing_enabled": True,
+        "key_fields": key_fields,
+        "entries": [
+            {"key": key, "price": price, "unit": "次"}
+            for key, _, price in specs
+        ],
+        "display": {
+            "title": title,
+            "unit": "次",
+            "billing_enabled": True,
+            "sections": [
+                {
+                    "title": title,
+                    "unit": "次",
+                    "columns": [
+                        {"key": "description", "title": "规格"},
+                        {"key": "price_text", "title": "价格"},
+                    ],
+                    "rows": [
+                        {
+                            "description": label,
+                            "price": price,
+                            "price_text": f"¥{price:.4f} / 次",
+                            "unit": "次",
+                        }
+                        for _, label, price in specs
+                    ],
+                }
+            ],
+        },
+    }
 
 
 def _copy_alias_rule(models: dict[str, Any], discovered: set[str], source_name: str, alias_name: str) -> None:
@@ -407,13 +609,25 @@ def clean_special_pricing(
         source_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
         raw_discovered = discover_special_models(source)
         discovered = set(raw_discovered)
-        normal_models = read_normal_model_names(normal_path)
-        if normal_models is not None:
+        normal_rows = read_normal_models(normal_path)
+        if normal_rows is not None:
+            normal_models = {str(item["model_name"]).strip() for item in normal_rows}
+            quota_type_four_models = {
+                str(item["model_name"]).strip()
+                for item in normal_rows
+                if item.get("quota_type") == 4
+            }
+            raw_discovered.update(quota_type_four_models)
+            if quota_type_four_models and not _has_quota_type_four_branch(source):
+                errors.append(
+                    "普通规则包含 quota_type=4 模型，但特殊规则源码没有可识别的 quota_type=4 结构分支"
+                )
             filtered_out = discovered - normal_models
             discovered.intersection_update(normal_models)
+            discovered.update(quota_type_four_models)
         if not discovered:
             errors.append("没有发现任何特殊模型分支")
-        document = build_special_pricing(discovered, credit_unit_price)
+        document = build_special_pricing(discovered, credit_unit_price, normal_rows)
         generated = set((document.get("models") or {}).keys())
         errors.extend(validate_document(document, discovered))
     except Exception as exc:

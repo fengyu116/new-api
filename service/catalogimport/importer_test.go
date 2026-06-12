@@ -1,7 +1,10 @@
 package catalogimport
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/setting/special_pricing"
 	"github.com/QuantumNous/new-api/setting/task_billing_rules"
 	"github.com/glebarez/sqlite"
@@ -56,6 +60,366 @@ func TestParseVectorNormalCatalog(t *testing.T) {
 	}
 	if len(catalog.AutoGroups) != 1 || catalog.AutoGroups[0] != "default" {
 		t.Fatalf("unexpected auto groups: %+v", catalog.AutoGroups)
+	}
+}
+
+func TestParseVectorNormalCompilesStepRatiosToTieredBilling(t *testing.T) {
+	input := []byte(`{
+		"auto_groups":["default"],
+		"group_ratio":{"default":1,"Codex专属":0.8},
+		"data":[{
+			"model_name":"gpt-5.5",
+			"quota_type":0,
+			"model_ratio":2.5,
+			"completion_ratio":6,
+			"cache_ratio":0.1,
+			"enable_groups":["default","Codex专属"],
+			"supported_endpoint_types":["openai"],
+			"step_ratios":[
+				{"step_size":272000,"completion_step_size":-1,"prompt_step_ratio":1,"completion_step_ratio":1,"cache_step_ratio":0},
+				{"step_size":1000000,"completion_step_size":-1,"prompt_step_ratio":2,"completion_step_ratio":1.5,"cache_step_ratio":0}
+			]
+		}]
+	}`)
+
+	catalog, err := ParseCatalog(ParseRequest{
+		ProviderCode: "vector",
+		ProviderName: "向量",
+		RuleType:     RuleTypeVectorNormal,
+		BaseURL:      "https://example.com",
+		Content:      input,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := catalog.BillingModes["gpt-5.5"]; got != "tiered_expr" {
+		t.Fatalf("billing mode = %q, want tiered_expr", got)
+	}
+	expr := catalog.BillingExprs["gpt-5.5"]
+	for _, want := range []string{
+		`len <= 272000`,
+		`tier("tier_1"`,
+		`p * 5`,
+		`c * 30`,
+		`cr * 0.5`,
+		`tier("tier_2"`,
+		`p * 10`,
+		`c * 45`,
+		`cr * 1`,
+	} {
+		if !strings.Contains(expr, want) {
+			t.Fatalf("billing expression %q does not contain %q", expr, want)
+		}
+	}
+}
+
+func TestParseVectorNormalThinkingStepRatiosDefaultToHigherPrice(t *testing.T) {
+	input := []byte(`{
+		"data":[{
+			"model_name":"qwen-plus",
+			"quota_type":0,
+			"model_ratio":0.4,
+			"completion_ratio":2.5,
+			"enable_groups":["default"],
+			"supported_endpoint_types":["openai"],
+			"step_ratios":[{
+				"step_size":128000,
+				"completion_step_size":-1,
+				"prompt_step_ratio":1,
+				"completion_step_ratio":1,
+				"cache_step_ratio":0,
+				"prompt_thinking_step_ratio":1,
+				"completion_thinking_step_ratio":4
+			}]
+		}]
+	}`)
+
+	catalog, err := ParseCatalog(ParseRequest{
+		ProviderCode: "vector",
+		ProviderName: "向量",
+		RuleType:     RuleTypeVectorNormal,
+		BaseURL:      "https://example.com",
+		Content:      input,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expr := catalog.BillingExprs["qwen-plus"]
+	if !strings.Contains(expr, `param("enable_thinking") == false`) {
+		t.Fatalf("thinking expression must only use non-thinking price for explicit false: %s", expr)
+	}
+	if !strings.Contains(expr, `c * 8`) {
+		t.Fatalf("thinking completion price missing from expression: %s", expr)
+	}
+	if !strings.Contains(expr, `c * 2`) {
+		t.Fatalf("non-thinking completion price missing from expression: %s", expr)
+	}
+}
+
+func TestValidateVectorRemotePricingRejectsAnyMismatch(t *testing.T) {
+	catalog := &ProviderCatalog{
+		ProviderCode: "vector",
+		BaseURL:      "https://q.aibaotui.com",
+		Groups:       map[string]string{"default": "default"},
+		GroupRatios:  map[string]float64{"default": 1},
+		Models: []CatalogModel{{
+			Name:            "gpt-5.5",
+			QuotaType:       0,
+			ModelRatio:      2.5,
+			CompletionRatio: 6,
+			EnableGroups:    []string{"default"},
+		}},
+	}
+	remote := []byte(`{"success":true,"data":{
+		"model_completion_ratio":{"gpt-5.5":6},
+		"group_special":{"gpt-5.5":["default"]},
+		"model_group":{"default":{"GroupRatio":1,"ModelPrice":{
+			"gpt-5.5":{"priceType":0,"price":9}
+		}}}
+	}}`)
+
+	report, err := ValidateVectorRemotePricing(catalog, remote)
+	if err == nil || !strings.Contains(err.Error(), "gpt-5.5") {
+		t.Fatalf("expected mismatch to block import, report=%+v err=%v", report, err)
+	}
+	if len(report.Mismatches) != 1 {
+		t.Fatalf("mismatches = %+v, want one", report.Mismatches)
+	}
+}
+
+func TestValidateVectorRemotePricingAcceptsMatchingCatalog(t *testing.T) {
+	catalog := &ProviderCatalog{
+		ProviderCode: "vector",
+		BaseURL:      "https://q.aibaotui.com",
+		Groups:       map[string]string{"default": "default", "Codex专属": "codex"},
+		GroupRatios:  map[string]float64{"default": 1, "Codex专属": 0.8},
+		Models: []CatalogModel{{
+			Name:            "gpt-5.5",
+			QuotaType:       0,
+			ModelRatio:      2.5,
+			CompletionRatio: 6,
+			EnableGroups:    []string{"default", "Codex专属"},
+		}},
+	}
+	remote := []byte(`{"success":true,"data":{
+		"model_completion_ratio":{"gpt-5.5":6},
+		"group_special":{"gpt-5.5":["Codex专属","default"]},
+		"model_group":{
+			"default":{"GroupRatio":1,"ModelPrice":{"gpt-5.5":{"priceType":0,"price":2.5}}},
+			"Codex专属":{"GroupRatio":0.8,"ModelPrice":{"gpt-5.5":{"priceType":0,"price":2.5}}}
+		}
+	}}`)
+
+	report, err := ValidateVectorRemotePricing(catalog, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.CheckedModels != 1 || len(report.Mismatches) != 0 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+}
+
+func TestDryRunReturnsStructuredRemotePricingBlockReport(t *testing.T) {
+	catalog := &ProviderCatalog{
+		ProviderCode: "vector",
+		BaseURL:      "https://q.aibaotui.com",
+		RemotePricingReport: &RemotePricingReport{
+			CheckedModels: 1,
+			Mismatches: []RemotePricingMismatch{{
+				ModelName: "gpt-5.5",
+				Group:     "default",
+				Field:     "base_price",
+				Local:     2.5,
+				Remote:    5,
+			}},
+		},
+		ValidationErrors: []string{"远端价格严格校验失败"},
+	}
+
+	report, err := DryRun(ImportRequest{Catalog: catalog})
+	if err == nil {
+		t.Fatal("expected dry-run to be blocked")
+	}
+	if len(report.BlockedReasons) != 1 || report.RemotePricingReport == nil {
+		t.Fatalf("expected structured blocked report, got %+v", report)
+	}
+	if len(report.RemotePricingReport.Mismatches) != 1 {
+		t.Fatalf("expected remote mismatch details, got %+v", report.RemotePricingReport)
+	}
+}
+
+func TestBuildOptionValuesPersistsTieredBilling(t *testing.T) {
+	catalog := &ProviderCatalog{
+		ProviderCode: "vector",
+		BaseURL:      "https://example.com",
+		Models: []CatalogModel{{
+			Name:            "gpt-tiered",
+			ModelRatio:      2.5,
+			CompletionRatio: 6,
+		}},
+		BillingModes: map[string]string{"gpt-tiered": "tiered_expr"},
+		BillingExprs: map[string]string{"gpt-tiered": `tier("base", p * 5 + c * 30)`},
+	}
+
+	values, err := buildOptionValues(catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var modes map[string]string
+	if err := json.Unmarshal([]byte(values["billing_setting.billing_mode"]), &modes); err != nil {
+		t.Fatal(err)
+	}
+	var expressions map[string]string
+	if err := json.Unmarshal([]byte(values["billing_setting.billing_expr"]), &expressions); err != nil {
+		t.Fatal(err)
+	}
+	if modes["gpt-tiered"] != "tiered_expr" || expressions["gpt-tiered"] == "" {
+		t.Fatalf("tiered options missing: modes=%+v expressions=%+v", modes, expressions)
+	}
+}
+
+func TestBuildOptionValuesStoresAsyncTokenPricingAsModelRatio(t *testing.T) {
+	catalog := &ProviderCatalog{
+		ProviderCode: "vector",
+		BaseURL:      "https://example.com",
+		Models: []CatalogModel{{
+			Name:            "doubao-async-token",
+			QuotaType:       3,
+			ModelPrice:      16,
+			CompletionRatio: 1,
+		}},
+	}
+
+	values, err := buildOptionValues(catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ratios map[string]float64
+	if err := json.Unmarshal([]byte(values["ModelRatio"]), &ratios); err != nil {
+		t.Fatal(err)
+	}
+	var prices map[string]float64
+	if err := json.Unmarshal([]byte(values["ModelPrice"]), &prices); err != nil {
+		t.Fatal(err)
+	}
+	if got := ratios["doubao-async-token"]; got != 8 {
+		t.Fatalf("async token model ratio = %v, want 8 so runtime price is 16/1M", got)
+	}
+	if _, ok := prices["doubao-async-token"]; ok {
+		t.Fatalf("async token model must not remain in ModelPrice: %+v", prices)
+	}
+}
+
+func TestFetchVectorRemotePricingUsesBaseURLPricingEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/pricing" {
+			t.Fatalf("path = %s, want /api/pricing", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{}}`))
+	}))
+	defer server.Close()
+
+	content, err := FetchVectorRemotePricing(context.Background(), server.Client(), server.URL+"/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), `"success":true`) {
+		t.Fatalf("unexpected response: %s", content)
+	}
+}
+
+func TestCurrentVectorNormalFixtureCompilesAllTieredPrices(t *testing.T) {
+	normal, err := os.ReadFile(filepath.Join("..", "..", "..", "向量普通规则.txt"))
+	if err != nil {
+		t.Skipf("normal fixture unavailable: %v", err)
+	}
+	catalog, err := ParseCatalog(ParseRequest{
+		ProviderCode: "vector",
+		ProviderName: "向量",
+		RuleType:     RuleTypeVectorNormal,
+		BaseURL:      "https://q.aibaotui.com",
+		Content:      normal,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Models) != 539 {
+		t.Fatalf("models = %d, want 539", len(catalog.Models))
+	}
+	if len(catalog.BillingModes) != 45 {
+		t.Fatalf("tiered billing models = %d, want 45", len(catalog.BillingModes))
+	}
+	for modelName, expectedPrices := range map[string][]string{
+		"gpt-5.4": {"p * 2.5", "c * 15", "p * 5", "c * 22.5"},
+		"gpt-5.5": {"p * 5", "c * 30", "p * 10", "c * 45"},
+	} {
+		expr := catalog.BillingExprs[modelName]
+		for _, expected := range expectedPrices {
+			if !strings.Contains(expr, expected) {
+				t.Fatalf("%s expression missing %q: %s", modelName, expected, expr)
+			}
+		}
+	}
+	gpt55 := catalog.BillingExprs["gpt-5.5"]
+	firstTier, _, err := billingexpr.RunExpr(gpt55, billingexpr.TokenParams{
+		P: 100, C: 10, Len: 272000, CR: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstTier != 100*5+10*30+20*0.5 {
+		t.Fatalf("gpt-5.5 first tier cost = %v", firstTier)
+	}
+	secondTier, _, err := billingexpr.RunExpr(gpt55, billingexpr.TokenParams{
+		P: 100, C: 10, Len: 272001, CR: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondTier != 100*10+10*45+20*1 {
+		t.Fatalf("gpt-5.5 second tier cost = %v", secondTier)
+	}
+}
+
+func TestCompiledThinkingPriceDefaultsToHigherTier(t *testing.T) {
+	model := CatalogModel{
+		Name:            "thinking-model",
+		ModelRatio:      0.5,
+		CompletionRatio: 2,
+		StepRatios: []StepRatio{{
+			StepSize:                    1000,
+			PromptStepRatio:             1,
+			CompletionStepRatio:         1,
+			PromptThinkingStepRatio:     2,
+			CompletionThinkingStepRatio: 3,
+		}},
+	}
+	expr, err := compileStepRatios(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingParamCost, _, err := billingexpr.RunExprWithRequest(
+		expr,
+		billingexpr.TokenParams{P: 100, C: 10, Len: 100},
+		billingexpr.RequestInput{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	explicitFalseCost, _, err := billingexpr.RunExprWithRequest(
+		expr,
+		billingexpr.TokenParams{P: 100, C: 10, Len: 100},
+		billingexpr.RequestInput{Body: []byte(`{"enable_thinking":false}`)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if missingParamCost != 100*2+10*6 {
+		t.Fatalf("missing enable_thinking cost = %v, want higher thinking price", missingParamCost)
+	}
+	if explicitFalseCost != 100*1+10*2 {
+		t.Fatalf("explicit false cost = %v, want non-thinking price", explicitFalseCost)
 	}
 }
 
@@ -119,6 +483,28 @@ func TestParseVectorBundleRequiresSpecialRulesForSpecialModels(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "特殊规则") {
 		t.Fatalf("expected missing special rules to block bundle, got %v", err)
+	}
+}
+
+func TestParseVectorBundleRequiresSpecialRuleForEveryDurationPricedModel(t *testing.T) {
+	normal := []byte(`{
+		"data":[{
+			"model_name":"future-provider-video",
+			"quota_type":4,
+			"model_price":0.1,
+			"enable_groups":["default"],
+			"supported_endpoint_types":["openai"]
+		}]
+	}`)
+
+	_, err := ParseVectorBundle(VectorBundleRequest{
+		ProviderCode:  "vector",
+		ProviderName:  "向量",
+		BaseURL:       "https://example.com",
+		NormalContent: normal,
+	})
+	if err == nil || !strings.Contains(err.Error(), "必须同时上传特殊规则") {
+		t.Fatalf("quota_type=4 without special pricing must block import, got %v", err)
 	}
 }
 
@@ -998,5 +1384,121 @@ func TestPostgresCurrentVectorFixturesDryRunAndApply(t *testing.T) {
 	}
 	if !strings.Contains(option.Value, `"grok-video-3-10s"`) {
 		t.Fatalf("grok task rule missing from full fixture apply")
+	}
+}
+
+func TestCurrentVectorFixturesMatchLivePricing(t *testing.T) {
+	if os.Getenv("RUN_VECTOR_LIVE_PRICING_TEST") != "1" {
+		t.Skip("set RUN_VECTOR_LIVE_PRICING_TEST=1 to validate current vector fixtures")
+	}
+	normal, err := os.ReadFile(filepath.Join("..", "..", "..", "向量普通规则.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	special, err := os.ReadFile(filepath.Join("..", "..", "tmp", "special-clean", "SpecialModelPricing.cleaned.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := FetchVectorRemotePricing(context.Background(), http.DefaultClient, "https://q.aibaotui.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := ParseVectorBundle(VectorBundleRequest{
+		ProviderCode:         "vector",
+		ProviderName:         "向量",
+		BaseURL:              "https://q.aibaotui.com",
+		NormalContent:        normal,
+		SpecialContent:       special,
+		RemotePricingContent: remote,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Models) != 539 {
+		t.Fatalf("models = %d, want 539", len(catalog.Models))
+	}
+	if len(catalog.BillingModes) != 45 {
+		t.Fatalf("tiered billing models = %d, want 45", len(catalog.BillingModes))
+	}
+	if catalog.RemotePricingReport == nil || len(catalog.RemotePricingReport.Mismatches) != 0 {
+		t.Fatalf("remote pricing mismatch: %+v", catalog.RemotePricingReport)
+	}
+	for _, modelName := range []string{
+		"happyhorse-1.0-i2v",
+		"happyhorse-1.0-r2v",
+		"happyhorse-1.0-t2v",
+		"happyhorse-1.0-video-edit",
+		"wan2.5-i2v-preview",
+		"wan2.6-i2v",
+		"wan2.6-i2v-flash",
+		"grok-imagine-1.0-video",
+		"kling-motion-control",
+	} {
+		rule, ok := specialPricingModels(catalog.SpecialPricing)[modelName].(map[string]any)
+		if !ok || rule["billing_enabled"] != true {
+			t.Fatalf("quota_type=4 model %s lacks enabled special pricing: %+v", modelName, rule)
+		}
+	}
+	gpt54 := catalog.BillingExprs["gpt-5.4"]
+	for _, expected := range []string{"p * 2.5", "c * 15", "p * 5", "c * 22.5"} {
+		if !strings.Contains(gpt54, expected) {
+			t.Fatalf("gpt-5.4 expression missing %q: %s", expected, gpt54)
+		}
+	}
+	gpt55 := catalog.BillingExprs["gpt-5.5"]
+	for _, expected := range []string{"p * 5", "c * 30", "p * 10", "c * 45"} {
+		if !strings.Contains(gpt55, expected) {
+			t.Fatalf("gpt-5.5 expression missing %q: %s", expected, gpt55)
+		}
+	}
+}
+
+func TestVectorFixturesFromEnvMatchLivePricing(t *testing.T) {
+	normalPath := strings.TrimSpace(os.Getenv("VECTOR_NORMAL_FIXTURE"))
+	specialPath := strings.TrimSpace(os.Getenv("VECTOR_SPECIAL_FIXTURE"))
+	if normalPath == "" || specialPath == "" {
+		t.Skip("set VECTOR_NORMAL_FIXTURE and VECTOR_SPECIAL_FIXTURE")
+	}
+	normal, err := os.ReadFile(normalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	special, err := os.ReadFile(specialPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := FetchVectorRemotePricing(
+		context.Background(),
+		http.DefaultClient,
+		"https://q.aibaotui.com",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := ParseVectorBundle(VectorBundleRequest{
+		ProviderCode:         "vector",
+		ProviderName:         "向量",
+		BaseURL:              "https://q.aibaotui.com",
+		NormalContent:        normal,
+		SpecialContent:       special,
+		RemotePricingContent: remote,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.ValidationErrors) > 0 {
+		t.Fatalf("strict validation blocked: %+v", catalog.ValidationErrors)
+	}
+	if catalog.RemotePricingReport == nil ||
+		len(catalog.RemotePricingReport.Mismatches) != 0 {
+		t.Fatalf("remote pricing mismatch: %+v", catalog.RemotePricingReport)
+	}
+	report, err := DryRun(ImportRequest{Catalog: catalog})
+	if err != nil {
+		t.Fatalf("dry-run failed: %v report=%+v", err, report)
+	}
+	if report.Models == 0 || report.TieredBillingModels == 0 ||
+		report.SpecialPricingModels == 0 {
+		t.Fatalf("incomplete import report: %+v", report)
 	}
 }

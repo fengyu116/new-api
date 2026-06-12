@@ -49,6 +49,19 @@ type ProviderCatalogReport = {
   invalid_rows?: Array<{ row: number; field: string; message: string }>
   special_pricing_models: number
   task_billing_rules: number
+  tiered_billing_models: number
+  remote_pricing_report?: {
+    checked_models: number
+    mismatches?: Array<{
+      model_name?: string
+      group?: string
+      field: string
+      local?: unknown
+      remote?: unknown
+    }>
+    remote_only_models?: string[]
+  }
+  blocked_reasons?: string[]
   source_hashes?: Record<string, string>
   previous_source_hashes?: Record<string, string>
   source_hashes_changed: boolean
@@ -186,7 +199,14 @@ export function ProviderCatalogImportSection() {
         return
       }
       setReport(res.data.data)
-      setMessage(mode === 'apply' ? '已写入数据库' : 'dry-run 预览已生成')
+      const blocked = (res.data.data.blocked_reasons?.length ?? 0) > 0
+      setMessage(
+        blocked
+          ? 'dry-run 已完成，但存在阻断项，不能写入'
+          : mode === 'apply'
+            ? '已写入数据库'
+            : 'dry-run 预览已生成'
+      )
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '请求失败')
     } finally {
@@ -354,7 +374,10 @@ export function ProviderCatalogImportSection() {
             type='button'
             variant='destructive'
             disabled={
-              !canSubmit || confirm.trim() !== APPLY_CONFIRM || loading !== null
+              !canSubmit ||
+              confirm.trim() !== APPLY_CONFIRM ||
+              loading !== null ||
+              (report?.blocked_reasons?.length ?? 0) > 0
             }
             onClick={() => submit('apply')}
           >
@@ -408,12 +431,12 @@ export function ProviderCatalogImportSection() {
         <div
           className={cn(
             'flex items-center gap-2 rounded-lg border px-3 py-2 text-sm',
-            report
+            report && (report.blocked_reasons?.length ?? 0) === 0
               ? 'border-green-500/30 text-green-700'
               : 'border-red-500/30 text-red-700'
           )}
         >
-          {report ? (
+          {report && (report.blocked_reasons?.length ?? 0) === 0 ? (
             <CheckCircle2 className='size-4' />
           ) : (
             <AlertCircle className='size-4' />
@@ -447,6 +470,8 @@ function ImportReportView({ report }: { report: ProviderCatalogReport }) {
     ['将替换渠道', report.channels_to_replace],
     ['特殊规则模型', report.special_pricing_models],
     ['任务计费规则', report.task_billing_rules],
+    ['阶梯计费模型', report.tiered_billing_models],
+    ['远端校验模型', report.remote_pricing_report?.checked_models ?? 0],
     ['托管标签前缀', report.managed_tag_prefix],
   ]
 
@@ -470,6 +495,7 @@ function ImportReportView({ report }: { report: ProviderCatalogReport }) {
           ))}
         </div>
 
+        <ReportList title='阻断原因' values={report.blocked_reasons} />
         <ReportList
           title='缺少 key 的分组'
           values={report.missing_key_groups}
@@ -499,6 +525,39 @@ function ImportReportView({ report }: { report: ProviderCatalogReport }) {
           title='跳过的特殊规则模型'
           values={report.skipped_special_models}
         />
+        {report.remote_pricing_report?.mismatches &&
+          report.remote_pricing_report.mismatches.length > 0 && (
+            <div className='grid gap-2'>
+              <div className='font-medium'>
+                远端价格差异（
+                {report.remote_pricing_report.mismatches.length}）
+              </div>
+              <div className='max-h-96 overflow-auto rounded-lg border'>
+                {report.remote_pricing_report.mismatches.map((item, index) => (
+                  <div
+                    key={`${item.model_name}-${item.group}-${item.field}-${index}`}
+                    className='grid gap-1 border-b p-3 text-sm last:border-b-0 md:grid-cols-5'
+                  >
+                    <span className='font-medium break-all'>
+                      {item.model_name || '-'}
+                    </span>
+                    <span>{item.group || '-'}</span>
+                    <span>{item.field}</span>
+                    <span className='break-all'>
+                      本地: {formatReportValue(item.local)}
+                    </span>
+                    <span className='break-all'>
+                      远端: {formatReportValue(item.remote)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        <ReportList
+          title='远端额外模型（不阻断）'
+          values={report.remote_pricing_report?.remote_only_models}
+        />
 
         {report.invalid_rows && report.invalid_rows.length > 0 && (
           <div className='grid gap-2'>
@@ -518,6 +577,12 @@ function ImportReportView({ report }: { report: ProviderCatalogReport }) {
       </CardContent>
     </Card>
   )
+}
+
+function formatReportValue(value: unknown) {
+  if (value === undefined || value === null) return '-'
+  if (typeof value === 'string') return value
+  return JSON.stringify(value)
 }
 
 function ReportList({ title, values }: { title: string; values?: string[] }) {
