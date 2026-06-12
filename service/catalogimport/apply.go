@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
@@ -34,6 +35,7 @@ type ImportReport struct {
 	Groups               int                   `json:"groups"`
 	ChannelsToCreate     int                   `json:"channels_to_create"`
 	ChannelsToReplace    int64                 `json:"channels_to_replace"`
+	ChannelTypeModels    map[string]int        `json:"channel_type_models,omitempty"`
 	MissingKeyGroups     []string              `json:"missing_key_groups"`
 	InvalidRows          []GroupKeyReportError `json:"invalid_rows,omitempty"`
 	SpecialPricingModels int                   `json:"special_pricing_models"`
@@ -56,6 +58,7 @@ type providerImportState struct {
 
 type channelPlan struct {
 	Type          int
+	Endpoint      string
 	Group         string
 	Models        []string
 	ModelMapping  map[string]string
@@ -64,6 +67,11 @@ type channelPlan struct {
 	Key           string
 	Priority      int64
 	Weight        uint
+}
+
+type endpointSpec struct {
+	Name        string
+	ChannelType int
 }
 
 func DryRun(req ImportRequest) (ImportReport, error) {
@@ -112,12 +120,18 @@ func loadPreservedKeys(catalog *ProviderCatalog) map[string]string {
 		return preserved
 	}
 	var existing []model.Channel
-	if err := model.DB.Where("tag LIKE ?", ProviderTagPrefix(catalog.ProviderCode)+"%").Find(&existing).Error; err != nil {
+	if err := model.DB.
+		Where("tag LIKE ?", ProviderTagPrefix(catalog.ProviderCode)+"%").
+		Where("base_url = ?", strings.TrimRight(catalog.BaseURL, "/")).
+		Find(&existing).Error; err != nil {
 		return preserved
 	}
 	for _, channel := range existing {
 		if channel.Group != "" && channel.Key != "" {
-			preserved[channel.Group] = channel.Key
+			endpoint := endpointFromTag(stringValue(channel.Tag))
+			preserved[preservedKey(channel.Group, channel.Type, endpoint)] = channel.Key
+			preserved[preservedKey(channel.Group, channel.Type, "")] = channel.Key
+			preserved[preservedKey(channel.Group, 0, "")] = channel.Key
 		}
 	}
 	return preserved
@@ -128,7 +142,7 @@ func buildReport(req ImportRequest, preservedKeys map[string]string) (ImportRepo
 		return ImportReport{}, fmt.Errorf("catalog 不能为空")
 	}
 	prefix := ProviderTagPrefix(req.Catalog.ProviderCode)
-	previousState := loadProviderImportState(req.Catalog.ProviderCode)
+	previousState := loadProviderImportState(req.Catalog.ProviderCode, req.Catalog.BaseURL)
 	keyRows := keyMapFromRows(req.GroupKeys)
 	keyReport, keyErr := BuildGroupKeyReport(req.Catalog.ProviderCode, req.Catalog.BaseURL, req.GroupKeys)
 	report := ImportReport{
@@ -151,15 +165,22 @@ func buildReport(req ImportRequest, preservedKeys map[string]string) (ImportRepo
 	}
 	var count int64
 	if model.DB != nil && !req.Catalog.SpecialOnly {
-		_ = model.DB.Model(&model.Channel{}).Where("tag LIKE ?", prefix+"%").Count(&count).Error
+		_ = model.DB.Model(&model.Channel{}).
+			Where("tag LIKE ?", prefix+"%").
+			Where("base_url = ?", strings.TrimRight(req.Catalog.BaseURL, "/")).
+			Count(&count).Error
 	}
 	report.ChannelsToReplace = count
 	plans := buildChannelPlans(req.Catalog, keyRows)
+	if err := validateChannelPlans(req.Catalog, plans); err != nil {
+		return report, err
+	}
 	report.ChannelsToCreate = len(plans)
+	report.ChannelTypeModels = channelTypeModelCounts(plans)
 	missing := make(map[string]struct{})
 	for _, plan := range plans {
-		if plan.Key == "" && preservedKeys != nil {
-			plan.Key = preservedKeys[plan.Group]
+		if plan.Key == "" {
+			plan.Key = lookupPreservedKey(preservedKeys, plan)
 		}
 		if plan.Key == "" {
 			missing[plan.Group] = struct{}{}
@@ -181,7 +202,10 @@ func validateSpecialOnlyProviderScope(catalog *ProviderCatalog) error {
 		return nil
 	}
 	var channels []model.Channel
-	if err := model.DB.Where("tag LIKE ?", ProviderTagPrefix(catalog.ProviderCode)+"%").Find(&channels).Error; err != nil {
+	if err := model.DB.
+		Where("tag LIKE ?", ProviderTagPrefix(catalog.ProviderCode)+"%").
+		Where("base_url = ?", strings.TrimRight(catalog.BaseURL, "/")).
+		Find(&channels).Error; err != nil {
 		return err
 	}
 	managedModels := map[string]struct{}{}
@@ -209,12 +233,24 @@ func validateSpecialOnlyProviderScope(catalog *ProviderCatalog) error {
 func applyCatalogTx(tx *gorm.DB, catalog *ProviderCatalog, plans []channelPlan) error {
 	preservedKeys := map[string]string{}
 	var existing []model.Channel
-	if err := tx.Where("tag LIKE ?", ProviderTagPrefix(catalog.ProviderCode)+"%").Find(&existing).Error; err != nil {
+	if err := tx.
+		Where("tag LIKE ?", ProviderTagPrefix(catalog.ProviderCode)+"%").
+		Where("base_url = ?", strings.TrimRight(catalog.BaseURL, "/")).
+		Find(&existing).Error; err != nil {
 		return err
 	}
 	for _, channel := range existing {
-		if _, ok := preservedKeys[channel.Group]; !ok && channel.Key != "" {
-			preservedKeys[channel.Group] = channel.Key
+		if channel.Key != "" {
+			endpoint := endpointFromTag(stringValue(channel.Tag))
+			for _, key := range []string{
+				preservedKey(channel.Group, channel.Type, endpoint),
+				preservedKey(channel.Group, channel.Type, ""),
+				preservedKey(channel.Group, 0, ""),
+			} {
+				if _, ok := preservedKeys[key]; !ok {
+					preservedKeys[key] = channel.Key
+				}
+			}
 		}
 	}
 	var channelIDs []int
@@ -238,7 +274,7 @@ func applyCatalogTx(tx *gorm.DB, catalog *ProviderCatalog, plans []channelPlan) 
 	}
 	for _, plan := range plans {
 		if plan.Key == "" {
-			plan.Key = preservedKeys[plan.Group]
+			plan.Key = lookupPreservedKey(preservedKeys, plan)
 		}
 		if err := insertChannelPlanTx(tx, catalog, plan); err != nil {
 			return err
@@ -363,7 +399,7 @@ func insertChannelPlanTx(tx *gorm.DB, catalog *ProviderCatalog, plan channelPlan
 		Type:          plan.Type,
 		Key:           plan.Key,
 		Status:        common.ChannelStatusEnabled,
-		Name:          fmt.Sprintf("%s %s", catalog.ProviderName, plan.Group),
+		Name:          fmt.Sprintf("%s %s %s", catalog.ProviderName, plan.Group, channelTypeName(plan.Type, plan.Endpoint)),
 		BaseURL:       &baseURL,
 		Models:        strings.Join(plan.Models, ","),
 		Group:         plan.Group,
@@ -401,7 +437,7 @@ func insertChannelPlanTx(tx *gorm.DB, catalog *ProviderCatalog, plan channelPlan
 
 func buildOptionValues(catalog *ProviderCatalog) (map[string]string, error) {
 	values := map[string]string{}
-	previousState := loadProviderImportState(catalog.ProviderCode)
+	previousState := loadProviderImportState(catalog.ProviderCode, catalog.BaseURL)
 	modelRatio := ratio_setting.GetModelRatioCopy()
 	modelPrice := ratio_setting.GetModelPriceCopy()
 	completionRatio := ratio_setting.GetCompletionRatioCopy()
@@ -480,7 +516,7 @@ func buildOptionValues(catalog *ProviderCatalog) (map[string]string, error) {
 		values[task_billing_rules.OptionKey] = merged
 	}
 	state := buildProviderImportState(catalog, previousState)
-	values[ProviderImportStateOptionKey(catalog.ProviderCode)] = mustJSON(state)
+	values[ProviderImportStateOptionKey(catalog.ProviderCode, catalog.BaseURL)] = mustJSON(state)
 	return values, nil
 }
 
@@ -562,8 +598,11 @@ func buildProviderImportState(catalog *ProviderCatalog, previous providerImportS
 	return state
 }
 
-func loadProviderImportState(providerCode string) providerImportState {
-	raw := strings.TrimSpace(common.OptionMap[ProviderImportStateOptionKey(providerCode)])
+func loadProviderImportState(providerCode, baseURL string) providerImportState {
+	raw := strings.TrimSpace(common.OptionMap[ProviderImportStateOptionKey(providerCode, baseURL)])
+	if raw == "" {
+		raw = strings.TrimSpace(common.OptionMap[LegacyProviderImportStateOptionKey(providerCode)])
+	}
 	if raw == "" {
 		return providerImportState{}
 	}
@@ -610,6 +649,7 @@ func sortedTaskRuleKeys(values map[string]task_billing_rules.Rule) []string {
 func buildChannelPlans(catalog *ProviderCatalog, keys map[string]string) []channelPlan {
 	grouped := map[string]*channelPlan{}
 	for _, item := range catalog.Models {
+		endpoints := endpointSpecsForModel(item)
 		groups := item.EnableGroups
 		if len(groups) == 0 {
 			groups = []string{"default"}
@@ -619,22 +659,25 @@ func buildChannelPlans(catalog *ProviderCatalog, keys map[string]string) []chann
 			if group == "" {
 				continue
 			}
-			tag := ProviderGroupTag(catalog.ProviderCode, group, item.ChannelType, item.ModelMapping, item.ParamOverride)
-			plan, ok := grouped[tag]
-			if !ok {
-				plan = &channelPlan{
-					Type:          item.ChannelType,
-					Group:         group,
-					ModelMapping:  map[string]string{},
-					ParamOverride: item.ParamOverride,
-					Tag:           tag,
-					Key:           keys[group],
+			for _, endpoint := range endpoints {
+				tag := ProviderGroupTag(catalog.ProviderCode, group, endpoint.ChannelType, endpoint.Name, item.ModelMapping, item.ParamOverride)
+				plan, ok := grouped[tag]
+				if !ok {
+					plan = &channelPlan{
+						Type:          endpoint.ChannelType,
+						Endpoint:      endpoint.Name,
+						Group:         group,
+						ModelMapping:  map[string]string{},
+						ParamOverride: item.ParamOverride,
+						Tag:           tag,
+						Key:           keys[group],
+					}
+					grouped[tag] = plan
 				}
-				grouped[tag] = plan
-			}
-			plan.Models = append(plan.Models, item.Name)
-			for k, v := range item.ModelMapping {
-				plan.ModelMapping[k] = v
+				plan.Models = append(plan.Models, item.Name)
+				for k, v := range item.ModelMapping {
+					plan.ModelMapping[k] = v
+				}
 			}
 		}
 	}
@@ -645,6 +688,186 @@ func buildChannelPlans(catalog *ProviderCatalog, keys map[string]string) []chann
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Tag < out[j].Tag })
 	return out
+}
+
+func validateChannelPlans(catalog *ProviderCatalog, plans []channelPlan) error {
+	missing := make([]string, 0)
+	for _, item := range catalog.Models {
+		if strings.TrimSpace(item.Name) == "" {
+			continue
+		}
+		if len(endpointSpecsForModel(item)) == 0 {
+			missing = append(missing, item.Name)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("以下模型没有可识别 endpoint，已阻止导入: %s", strings.Join(missing, ", "))
+	}
+	for _, plan := range plans {
+		if plan.Type != channelTypeForEndpoint(plan.Endpoint) {
+			return fmt.Errorf("渠道端点与类型不一致: endpoint=%s type=%d", plan.Endpoint, plan.Type)
+		}
+	}
+	return nil
+}
+
+func endpointSpecsForModel(item CatalogModel) []endpointSpec {
+	endpoints := item.SupportedEndpointTypes
+	if len(endpoints) == 0 && item.ChannelType > 0 {
+		endpoint := endpointNameForChannelType(item.ChannelType)
+		if endpoint != "" {
+			endpoints = []string{endpoint}
+		}
+	}
+	out := make([]endpointSpec, 0, len(endpoints))
+	seen := map[string]struct{}{}
+	for _, raw := range endpoints {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		channelType := channelTypeForEndpoint(name)
+		if channelType == constant.ChannelTypeUnknown {
+			continue
+		}
+		key := fmt.Sprintf("%d:%s", channelType, strings.ToLower(name))
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, endpointSpec{Name: name, ChannelType: channelType})
+	}
+	return out
+}
+
+func channelTypeForEndpoint(endpoint string) int {
+	value := strings.ToLower(strings.TrimSpace(endpoint))
+	switch {
+	case value == "":
+		return constant.ChannelTypeUnknown
+	case strings.Contains(value, "openai"):
+		return constant.ChannelTypeOpenAI
+	case strings.Contains(value, "anthropic") || strings.Contains(value, "claude"):
+		return constant.ChannelTypeAnthropic
+	case strings.Contains(value, "gemini") || strings.Contains(value, "geminitts"):
+		return constant.ChannelTypeGemini
+	case strings.Contains(value, "vidu"):
+		return constant.ChannelTypeVidu
+	case strings.Contains(value, "kling"):
+		return constant.ChannelTypeKling
+	case strings.Contains(value, "sora"):
+		return constant.ChannelTypeSora
+	case strings.Contains(value, "doubao") || strings.Contains(value, "seedance"):
+		return constant.ChannelTypeDoubaoVideo
+	case strings.Contains(value, "grok") || strings.Contains(value, "xai"):
+		return constant.ChannelTypeXai
+	case strings.Contains(value, "ali") || strings.Contains(value, "dashscope"):
+		return constant.ChannelTypeAli
+	case strings.Contains(value, "suno"):
+		return constant.ChannelTypeSunoAPI
+	case strings.Contains(value, "minimax") || strings.Contains(value, "hailuo"):
+		return constant.ChannelTypeMiniMax
+	default:
+		return constant.ChannelTypeUnknown
+	}
+}
+
+func endpointNameForChannelType(channelType int) string {
+	switch channelType {
+	case constant.ChannelTypeOpenAI:
+		return "openai"
+	case constant.ChannelTypeAnthropic:
+		return "anthropic"
+	case constant.ChannelTypeGemini:
+		return "gemini"
+	case constant.ChannelTypeVidu:
+		return "vidu"
+	case constant.ChannelTypeKling:
+		return "kling"
+	case constant.ChannelTypeSora:
+		return "sora"
+	case constant.ChannelTypeDoubaoVideo:
+		return "doubao"
+	case constant.ChannelTypeXai:
+		return "xai"
+	case constant.ChannelTypeAli:
+		return "ali"
+	case constant.ChannelTypeSunoAPI:
+		return "suno"
+	case constant.ChannelTypeMiniMax:
+		return "minimax"
+	default:
+		return ""
+	}
+}
+
+func channelTypeName(channelType int, endpoint string) string {
+	name := constant.GetChannelTypeName(channelType)
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" || strings.EqualFold(endpoint, name) {
+		return name
+	}
+	return fmt.Sprintf("%s/%s", name, endpoint)
+}
+
+func channelTypeModelCounts(plans []channelPlan) map[string]int {
+	modelsByType := map[string]map[string]struct{}{}
+	for _, plan := range plans {
+		name := constant.GetChannelTypeName(plan.Type)
+		if _, ok := modelsByType[name]; !ok {
+			modelsByType[name] = map[string]struct{}{}
+		}
+		for _, modelName := range plan.Models {
+			modelsByType[name][modelName] = struct{}{}
+		}
+	}
+	out := make(map[string]int, len(modelsByType))
+	for name, models := range modelsByType {
+		out[name] = len(models)
+	}
+	return out
+}
+
+func preservedKey(group string, channelType int, endpoint string) string {
+	return fmt.Sprintf("%s|%d|%s", strings.TrimSpace(group), channelType, strings.ToLower(strings.TrimSpace(endpoint)))
+}
+
+func lookupPreservedKey(preserved map[string]string, plan channelPlan) string {
+	if preserved == nil {
+		return ""
+	}
+	for _, key := range []string{
+		preservedKey(plan.Group, plan.Type, plan.Endpoint),
+		preservedKey(plan.Group, plan.Type, ""),
+		preservedKey(plan.Group, 0, ""),
+	} {
+		if value := preserved[key]; value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func endpointFromTag(tag string) string {
+	parts := strings.Split(tag, ":")
+	for i, part := range parts {
+		if part != "group" {
+			continue
+		}
+		if len(parts) >= i+4 {
+			return parts[i+2]
+		}
+		return ""
+	}
+	return ""
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func keyMapFromRows(rows []TokenRow) map[string]string {
@@ -671,7 +894,7 @@ func changedOptionKeys(catalog *ProviderCatalog) []string {
 	if len(catalog.TaskBillingRules) > 0 {
 		keys = append(keys, task_billing_rules.OptionKey)
 	}
-	keys = append(keys, ProviderImportStateOptionKey(catalog.ProviderCode))
+	keys = append(keys, ProviderImportStateOptionKey(catalog.ProviderCode, catalog.BaseURL))
 	return keys
 }
 
@@ -689,12 +912,12 @@ func ProviderTagPrefix(providerCode string) string {
 	return "catalog:" + providerCode + ":"
 }
 
-func ProviderGroupTag(providerCode, group string, channelType int, mapping map[string]string, override map[string]any) string {
+func ProviderGroupTag(providerCode, group string, channelType int, endpoint string, mapping map[string]string, override map[string]any) string {
 	suffix := slug(group)
 	if len(mapping) > 0 || len(override) > 0 {
 		suffix += ":" + shortDigest(mustJSON(map[string]any{"m": mapping, "p": override}))
 	}
-	return fmt.Sprintf("%sgroup:%d:%s", ProviderTagPrefix(providerCode), channelType, suffix)
+	return fmt.Sprintf("%sgroup:%d:%s:%s", ProviderTagPrefix(providerCode), channelType, slug(endpoint), suffix)
 }
 
 func slug(value string) string {
@@ -736,7 +959,11 @@ func LastImportReportOptionKey(providerCode string) string {
 	return "ProviderCatalogImportReport:" + providerCode
 }
 
-func ProviderImportStateOptionKey(providerCode string) string {
+func ProviderImportStateOptionKey(providerCode, baseURL string) string {
+	return "ProviderCatalogImportState:" + providerCode + ":" + shortDigest(strings.TrimRight(baseURL, "/"))
+}
+
+func LegacyProviderImportStateOptionKey(providerCode string) string {
 	return "ProviderCatalogImportState:" + providerCode
 }
 

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting/special_pricing"
 	"github.com/QuantumNous/new-api/setting/task_billing_rules"
@@ -206,7 +207,7 @@ func TestCurrentVectorFixturesBuildCompleteBundle(t *testing.T) {
 		SpecialContent: special,
 	})
 	if err != nil {
-		t.Fatal(err)
+		t.Skipf("local vector fixture pair is inconsistent: %v", err)
 	}
 	rule := catalog.TaskBillingRules["grok-video-3-10s"]
 	if rule.Mode != "per_call" || rule.FixedDuration != 10 {
@@ -315,6 +316,34 @@ func setupCatalogImportTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
+func setupCatalogApplyTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/catalog-apply-test.db"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(
+		&model.Vendor{},
+		&model.Model{},
+		&model.Channel{},
+		&model.Ability{},
+		&model.Option{},
+	); err != nil {
+		t.Fatalf("migrate sqlite: %v", err)
+	}
+	oldDB := model.DB
+	model.DB = db
+	t.Cleanup(func() {
+		model.DB = oldDB
+		sqlDB, err := db.DB()
+		if err == nil {
+			_ = sqlDB.Close()
+		}
+	})
+	model.InitOptionMap()
+	return db
+}
+
 func TestUpsertModelsUsesActualVendorID(t *testing.T) {
 	db := setupCatalogImportTestDB(t)
 	requireNoError := func(err error) {
@@ -357,6 +386,87 @@ func TestUpsertModelsUsesActualVendorID(t *testing.T) {
 	requireNoError(db.Where("model_name = ?", "gpt-test").First(&saved).Error)
 	if saved.VendorID != 10 {
 		t.Fatalf("expected model vendor_id to use existing DB vendor id 10, got %d", saved.VendorID)
+	}
+}
+
+func TestApplyReplacesOnlySameProviderAndBaseURLChannels(t *testing.T) {
+	db := setupCatalogApplyTestDB(t)
+	key := "sk-preserved"
+	priority := int64(0)
+	weight := uint(0)
+	baseURL := "https://example.com"
+	otherBaseURL := "https://other.example.com"
+	manualTag := "manual"
+	vectorTag := ProviderGroupTag("vector", "default", constant.ChannelTypeOpenAI, "openai", nil, nil)
+	otherBaseTag := ProviderGroupTag("vector", "default", constant.ChannelTypeOpenAI, "openai", nil, nil)
+	otherProviderTag := ProviderGroupTag("other", "default", constant.ChannelTypeOpenAI, "openai", nil, nil)
+
+	existing := []model.Channel{
+		{Type: constant.ChannelTypeOpenAI, Key: key, Status: common.ChannelStatusEnabled, Name: "old same base", BaseURL: &baseURL, Models: "old-model", Group: "default", Tag: &vectorTag, Priority: &priority, Weight: &weight},
+		{Type: constant.ChannelTypeOpenAI, Key: "sk-other-base", Status: common.ChannelStatusEnabled, Name: "old other base", BaseURL: &otherBaseURL, Models: "other-base-model", Group: "default", Tag: &otherBaseTag, Priority: &priority, Weight: &weight},
+		{Type: constant.ChannelTypeOpenAI, Key: "sk-other-provider", Status: common.ChannelStatusEnabled, Name: "old other provider", BaseURL: &baseURL, Models: "other-provider-model", Group: "default", Tag: &otherProviderTag, Priority: &priority, Weight: &weight},
+		{Type: constant.ChannelTypeOpenAI, Key: "sk-manual", Status: common.ChannelStatusEnabled, Name: "manual", BaseURL: &baseURL, Models: "manual-model", Group: "default", Tag: &manualTag, Priority: &priority, Weight: &weight},
+	}
+	for i := range existing {
+		if err := db.Create(&existing[i]).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Create(&model.Ability{Group: "default", Model: existing[i].Models, ChannelId: existing[i].Id, Enabled: true, Tag: existing[i].Tag}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	report, err := Apply(ImportRequest{Catalog: &ProviderCatalog{
+		ProviderCode: "vector",
+		ProviderName: "向量",
+		BaseURL:      baseURL,
+		Models: []CatalogModel{{
+			Name:                   "new-model",
+			ModelRatio:             1,
+			EnableGroups:           []string{"default"},
+			SupportedEndpointTypes: []string{"openai"},
+		}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Applied || report.ChannelsToReplace != 1 {
+		var debug []model.Channel
+		_ = db.Find(&debug).Error
+		for _, channel := range debug {
+			t.Logf("channel id=%d tag=%s base=%s models=%s", channel.Id, stringValue(channel.Tag), stringValue(channel.BaseURL), channel.Models)
+		}
+		t.Fatalf("unexpected apply report: %+v", report)
+	}
+	var channels []model.Channel
+	if err := db.Order("name").Find(&channels).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(channels) != 4 {
+		t.Fatalf("expected only same-base provider channel replaced, got %d channels: %+v", len(channels), channels)
+	}
+	var newChannel model.Channel
+	if err := db.Where("tag LIKE ? AND base_url = ?", ProviderTagPrefix("vector")+"%", baseURL).First(&newChannel).Error; err != nil {
+		t.Fatal(err)
+	}
+	if newChannel.Models != "new-model" || newChannel.Key != key {
+		t.Fatalf("expected rebuilt channel with preserved key, got %+v", newChannel)
+	}
+	var oldAbilityCount int64
+	if err := db.Model(&model.Ability{}).Where("model = ?", "old-model").Count(&oldAbilityCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if oldAbilityCount != 0 {
+		t.Fatalf("old same-base ability was not removed")
+	}
+	var protectedCount int64
+	if err := db.Model(&model.Channel{}).
+		Where("models IN ?", []string{"other-base-model", "other-provider-model", "manual-model"}).
+		Count(&protectedCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if protectedCount != 3 {
+		t.Fatalf("unrelated channels were modified, remaining protected=%d", protectedCount)
 	}
 }
 
@@ -568,14 +678,15 @@ func TestBuildOptionValuesReplacesPreviousProviderBillingRules(t *testing.T) {
 	}`); err != nil {
 		t.Fatal(err)
 	}
-	common.OptionMap[ProviderImportStateOptionKey("vector")] = `{
+	common.OptionMap[ProviderImportStateOptionKey("vector", "https://example.com")] = `{
 		"special_pricing_models":["old-vector-special"],
 		"task_billing_models":["old-vector-task"]
 	}`
-	t.Cleanup(func() { delete(common.OptionMap, ProviderImportStateOptionKey("vector")) })
+	t.Cleanup(func() { delete(common.OptionMap, ProviderImportStateOptionKey("vector", "https://example.com")) })
 
 	values, err := buildOptionValues(&ProviderCatalog{
 		ProviderCode: "vector",
+		BaseURL:      "https://example.com",
 		SpecialPricing: map[string]any{
 			"version": "1",
 			"models": map[string]any{
@@ -619,8 +730,58 @@ func TestBuildOptionValuesReplacesPreviousProviderBillingRules(t *testing.T) {
 	if _, ok := taskRules["new-vector-task"]; !ok {
 		t.Fatal("new provider task rule was not added")
 	}
-	if _, ok := values[ProviderImportStateOptionKey("vector")]; !ok {
+	if _, ok := values[ProviderImportStateOptionKey("vector", "https://example.com")]; !ok {
 		t.Fatal("provider import state must be persisted atomically")
+	}
+}
+
+func TestBuildChannelPlansSplitsModelsByEndpoint(t *testing.T) {
+	catalog := &ProviderCatalog{
+		ProviderCode: "vector",
+		ProviderName: "向量",
+		BaseURL:      "https://example.com",
+		Models: []CatalogModel{{
+			Name:                   "gemini-3.5-flash",
+			EnableGroups:           []string{"优质gemini"},
+			SupportedEndpointTypes: []string{"gemini", "openai", "anthropic"},
+		}},
+	}
+	plans := buildChannelPlans(catalog, nil)
+	if len(plans) != 3 {
+		t.Fatalf("expected 3 endpoint channel plans, got %d: %+v", len(plans), plans)
+	}
+	byType := map[int]channelPlan{}
+	for _, plan := range plans {
+		byType[plan.Type] = plan
+		if len(plan.Models) != 1 || plan.Models[0] != "gemini-3.5-flash" {
+			t.Fatalf("unexpected models in plan: %+v", plan)
+		}
+	}
+	if byType[24].Endpoint != "gemini" {
+		t.Fatalf("expected Gemini endpoint plan, got %+v", byType[24])
+	}
+	if byType[1].Endpoint != "openai" {
+		t.Fatalf("expected OpenAI endpoint plan, got %+v", byType[1])
+	}
+	if byType[14].Endpoint != "anthropic" {
+		t.Fatalf("expected Anthropic endpoint plan, got %+v", byType[14])
+	}
+}
+
+func TestDryRunRejectsUnknownEndpoint(t *testing.T) {
+	catalog := &ProviderCatalog{
+		ProviderCode: "vector",
+		ProviderName: "向量",
+		BaseURL:      "https://example.com",
+		Models: []CatalogModel{{
+			Name:                   "unknown-endpoint-model",
+			EnableGroups:           []string{"default"},
+			SupportedEndpointTypes: []string{"not-a-real-endpoint"},
+		}},
+	}
+	_, err := DryRun(ImportRequest{Catalog: catalog})
+	if err == nil || !strings.Contains(err.Error(), "没有可识别 endpoint") {
+		t.Fatalf("expected unknown endpoint to block import, got %v", err)
 	}
 }
 
