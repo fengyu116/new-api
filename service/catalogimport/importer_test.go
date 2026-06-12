@@ -816,6 +816,105 @@ func TestBuildChannelPlansSplitsModelsByEndpoint(t *testing.T) {
 	}
 }
 
+func TestEndpointResolverUsesEndpointPathBeforeLabel(t *testing.T) {
+	catalog := &ProviderCatalog{
+		ProviderCode: "vector",
+		ProviderName: "向量",
+		BaseURL:      "https://example.com",
+		Models: []CatalogModel{
+			{
+				Name:                   "qwen-image-2.0",
+				ModelType:              "图像",
+				EnableGroups:           []string{"default"},
+				SupportedEndpointTypes: []string{"images-generations"},
+				EndpointMap: map[string]any{
+					"images-generations": map[string]any{"path": "/v1/images/generations", "method": "POST"},
+				},
+			},
+			{
+				Name:                   "mj_imagine",
+				EnableGroups:           []string{"default"},
+				SupportedEndpointTypes: []string{"mj想象模式"},
+				EndpointMap: map[string]any{
+					"mj想象模式": map[string]any{"path": "/mj/submit/imagine", "method": "POST"},
+				},
+			},
+			{
+				Name:                   "pixverse-video",
+				ModelType:              "音视频",
+				EnableGroups:           []string{"default"},
+				SupportedEndpointTypes: []string{"pix文生视频"},
+				EndpointMap: map[string]any{
+					"pix文生视频": map[string]any{"path": "/openapi/v2/video/text/generate", "method": "POST"},
+				},
+			},
+			{
+				Name:                   "happyhorse-1.0-i2v",
+				ModelType:              "音视频",
+				EnableGroups:           []string{"default"},
+				SupportedEndpointTypes: []string{"happyhorse视频"},
+				EndpointMap: map[string]any{
+					"happyhorse视频": map[string]any{"path": "/alibailian/api/v1/services/aigc/video-generation/video-synthesis", "method": "POST"},
+				},
+			},
+		},
+	}
+
+	plans := buildChannelPlans(catalog, nil)
+	byModel := map[string]channelPlan{}
+	for _, plan := range plans {
+		for _, modelName := range plan.Models {
+			byModel[modelName] = plan
+		}
+	}
+	if byModel["qwen-image-2.0"].Type != constant.ChannelTypeOpenAI {
+		t.Fatalf("expected OpenAI image channel, got %+v", byModel["qwen-image-2.0"])
+	}
+	if byModel["mj_imagine"].Type != constant.ChannelTypeMidjourney {
+		t.Fatalf("expected Midjourney channel, got %+v", byModel["mj_imagine"])
+	}
+	if byModel["pixverse-video"].Type != constant.ChannelTypeCustom {
+		t.Fatalf("expected Custom channel for PixVerse proxy path, got %+v", byModel["pixverse-video"])
+	}
+	if byModel["happyhorse-1.0-i2v"].Type != constant.ChannelTypeAli {
+		t.Fatalf("expected Ali channel from alibailian path, got %+v", byModel["happyhorse-1.0-i2v"])
+	}
+}
+
+func TestDryRunReportsResolvedAndUnresolvedEndpoints(t *testing.T) {
+	catalog := &ProviderCatalog{
+		ProviderCode: "vector",
+		ProviderName: "向量",
+		BaseURL:      "https://example.com",
+		Models: []CatalogModel{
+			{
+				Name:                   "text-embedding-3-small",
+				EnableGroups:           []string{"default"},
+				SupportedEndpointTypes: []string{"嵌入"},
+				EndpointMap: map[string]any{
+					"嵌入": map[string]any{"path": "/v1/embeddings", "method": "POST"},
+				},
+			},
+			{
+				Name:                   "unknown-endpoint-model",
+				EnableGroups:           []string{"default"},
+				SupportedEndpointTypes: []string{"not-a-real-endpoint"},
+			},
+		},
+	}
+
+	report, err := DryRun(ImportRequest{Catalog: catalog})
+	if err == nil || !strings.Contains(err.Error(), "没有可识别 endpoint") {
+		t.Fatalf("expected unknown endpoint to block import, got %v", err)
+	}
+	if len(report.ResolvedEndpoints) == 0 {
+		t.Fatalf("expected resolved endpoint report: %+v", report)
+	}
+	if len(report.UnresolvedEndpoints) != 1 || report.UnresolvedEndpoints[0].ModelName != "unknown-endpoint-model" {
+		t.Fatalf("expected unresolved endpoint report, got %+v", report.UnresolvedEndpoints)
+	}
+}
+
 func TestDryRunRejectsUnknownEndpoint(t *testing.T) {
 	catalog := &ProviderCatalog{
 		ProviderCode: "vector",

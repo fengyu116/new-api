@@ -36,6 +36,8 @@ type ImportReport struct {
 	ChannelsToCreate     int                   `json:"channels_to_create"`
 	ChannelsToReplace    int64                 `json:"channels_to_replace"`
 	ChannelTypeModels    map[string]int        `json:"channel_type_models,omitempty"`
+	ResolvedEndpoints    []EndpointResolution  `json:"resolved_endpoints,omitempty"`
+	UnresolvedEndpoints  []EndpointResolution  `json:"unresolved_endpoints,omitempty"`
 	MissingKeyGroups     []string              `json:"missing_key_groups"`
 	InvalidRows          []GroupKeyReportError `json:"invalid_rows,omitempty"`
 	SpecialPricingModels int                   `json:"special_pricing_models"`
@@ -49,6 +51,19 @@ type ImportReport struct {
 	Applied              bool                  `json:"applied"`
 }
 
+type EndpointResolution struct {
+	ModelName   string `json:"model_name,omitempty"`
+	Endpoint    string `json:"endpoint,omitempty"`
+	Path        string `json:"path,omitempty"`
+	Method      string `json:"method,omitempty"`
+	ChannelType string `json:"channel_type,omitempty"`
+	Source      string `json:"source,omitempty"`
+	Models      int    `json:"models,omitempty"`
+	ModelType   string `json:"model_type,omitempty"`
+	Tags        string `json:"tags,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+}
+
 type providerImportState struct {
 	SourceHashes         map[string]string `json:"source_hashes,omitempty"`
 	SpecialPricingModels []string          `json:"special_pricing_models,omitempty"`
@@ -57,21 +72,27 @@ type providerImportState struct {
 }
 
 type channelPlan struct {
-	Type          int
-	Endpoint      string
-	Group         string
-	Models        []string
-	ModelMapping  map[string]string
-	ParamOverride map[string]any
-	Tag           string
-	Key           string
-	Priority      int64
-	Weight        uint
+	Type             int
+	Endpoint         string
+	EndpointPath     string
+	EndpointMethod   string
+	ResolutionSource string
+	Group            string
+	Models           []string
+	ModelMapping     map[string]string
+	ParamOverride    map[string]any
+	Tag              string
+	Key              string
+	Priority         int64
+	Weight           uint
 }
 
 type endpointSpec struct {
 	Name        string
 	ChannelType int
+	Path        string
+	Method      string
+	Source      string
 }
 
 func DryRun(req ImportRequest) (ImportReport, error) {
@@ -173,10 +194,14 @@ func buildReport(req ImportRequest, preservedKeys map[string]string) (ImportRepo
 	report.ChannelsToReplace = count
 	plans := buildChannelPlans(req.Catalog, keyRows)
 	if err := validateChannelPlans(req.Catalog, plans); err != nil {
+		report.ResolvedEndpoints = resolvedEndpointReports(plans)
+		report.UnresolvedEndpoints = unresolvedEndpointReports(req.Catalog)
 		return report, err
 	}
 	report.ChannelsToCreate = len(plans)
 	report.ChannelTypeModels = channelTypeModelCounts(plans)
+	report.ResolvedEndpoints = resolvedEndpointReports(plans)
+	report.UnresolvedEndpoints = unresolvedEndpointReports(req.Catalog)
 	missing := make(map[string]struct{})
 	for _, plan := range plans {
 		if plan.Key == "" {
@@ -664,13 +689,16 @@ func buildChannelPlans(catalog *ProviderCatalog, keys map[string]string) []chann
 				plan, ok := grouped[tag]
 				if !ok {
 					plan = &channelPlan{
-						Type:          endpoint.ChannelType,
-						Endpoint:      endpoint.Name,
-						Group:         group,
-						ModelMapping:  map[string]string{},
-						ParamOverride: item.ParamOverride,
-						Tag:           tag,
-						Key:           keys[group],
+						Type:             endpoint.ChannelType,
+						Endpoint:         endpoint.Name,
+						EndpointPath:     endpoint.Path,
+						EndpointMethod:   endpoint.Method,
+						ResolutionSource: endpoint.Source,
+						Group:            group,
+						ModelMapping:     map[string]string{},
+						ParamOverride:    item.ParamOverride,
+						Tag:              tag,
+						Key:              keys[group],
 					}
 					grouped[tag] = plan
 				}
@@ -691,21 +719,17 @@ func buildChannelPlans(catalog *ProviderCatalog, keys map[string]string) []chann
 }
 
 func validateChannelPlans(catalog *ProviderCatalog, plans []channelPlan) error {
-	missing := make([]string, 0)
-	for _, item := range catalog.Models {
-		if strings.TrimSpace(item.Name) == "" {
-			continue
+	unresolved := unresolvedEndpointReports(catalog)
+	if len(unresolved) > 0 {
+		missing := make([]string, 0, len(unresolved))
+		for _, item := range unresolved {
+			missing = append(missing, item.ModelName)
 		}
-		if len(endpointSpecsForModel(item)) == 0 {
-			missing = append(missing, item.Name)
-		}
-	}
-	if len(missing) > 0 {
 		sort.Strings(missing)
 		return fmt.Errorf("以下模型没有可识别 endpoint，已阻止导入: %s", strings.Join(missing, ", "))
 	}
 	for _, plan := range plans {
-		if plan.Type != channelTypeForEndpoint(plan.Endpoint) {
+		if plan.Type == constant.ChannelTypeUnknown {
 			return fmt.Errorf("渠道端点与类型不一致: endpoint=%s type=%d", plan.Endpoint, plan.Type)
 		}
 	}
@@ -723,54 +747,179 @@ func endpointSpecsForModel(item CatalogModel) []endpointSpec {
 	out := make([]endpointSpec, 0, len(endpoints))
 	seen := map[string]struct{}{}
 	for _, raw := range endpoints {
-		name := strings.TrimSpace(raw)
-		if name == "" {
+		label := strings.TrimSpace(raw)
+		if label == "" {
 			continue
 		}
-		channelType := channelTypeForEndpoint(name)
-		if channelType == constant.ChannelTypeUnknown {
+		path, method := endpointPathAndMethod(item.EndpointMap[label])
+		spec := resolveEndpointSpec(item, label, path, method)
+		if spec.ChannelType == constant.ChannelTypeUnknown {
 			continue
 		}
-		key := fmt.Sprintf("%d:%s", channelType, strings.ToLower(name))
+		key := fmt.Sprintf("%d:%s", spec.ChannelType, strings.ToLower(spec.Name))
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = struct{}{}
-		out = append(out, endpointSpec{Name: name, ChannelType: channelType})
+		out = append(out, spec)
 	}
 	return out
 }
 
 func channelTypeForEndpoint(endpoint string) int {
-	value := strings.ToLower(strings.TrimSpace(endpoint))
+	return resolveEndpointSpec(CatalogModel{}, endpoint, "", "").ChannelType
+}
+
+func resolveEndpointSpec(item CatalogModel, label string, path string, method string) endpointSpec {
+	label = strings.TrimSpace(label)
+	path = strings.TrimSpace(path)
+	method = strings.ToUpper(strings.TrimSpace(method))
+	if channelType, endpoint := resolveEndpointByPath(path); channelType != constant.ChannelTypeUnknown {
+		return endpointSpec{Name: endpoint, ChannelType: channelType, Path: path, Method: method, Source: "path"}
+	}
+	if channelType, endpoint := resolveEndpointByLabel(label); channelType != constant.ChannelTypeUnknown {
+		return endpointSpec{Name: endpoint, ChannelType: channelType, Path: path, Method: method, Source: "label"}
+	}
+	if channelType, endpoint := resolveEndpointByMetadata(item); channelType != constant.ChannelTypeUnknown {
+		return endpointSpec{Name: endpoint, ChannelType: channelType, Path: path, Method: method, Source: "metadata"}
+	}
+	return endpointSpec{Name: label, ChannelType: constant.ChannelTypeUnknown, Path: path, Method: method, Source: "unresolved"}
+}
+
+func resolveEndpointByPath(path string) (int, string) {
+	value := normalizeEndpointText(path)
 	switch {
 	case value == "":
-		return constant.ChannelTypeUnknown
-	case strings.Contains(value, "openai"):
-		return constant.ChannelTypeOpenAI
-	case strings.Contains(value, "anthropic") || strings.Contains(value, "claude"):
-		return constant.ChannelTypeAnthropic
-	case strings.Contains(value, "gemini") || strings.Contains(value, "geminitts"):
-		return constant.ChannelTypeGemini
-	case strings.Contains(value, "vidu"):
-		return constant.ChannelTypeVidu
-	case strings.Contains(value, "kling"):
-		return constant.ChannelTypeKling
-	case strings.Contains(value, "sora"):
-		return constant.ChannelTypeSora
-	case strings.Contains(value, "doubao") || strings.Contains(value, "seedance"):
-		return constant.ChannelTypeDoubaoVideo
-	case strings.Contains(value, "grok") || strings.Contains(value, "xai"):
-		return constant.ChannelTypeXai
-	case strings.Contains(value, "ali") || strings.Contains(value, "dashscope"):
-		return constant.ChannelTypeAli
-	case strings.Contains(value, "suno"):
-		return constant.ChannelTypeSunoAPI
-	case strings.Contains(value, "minimax") || strings.Contains(value, "hailuo"):
-		return constant.ChannelTypeMiniMax
+		return constant.ChannelTypeUnknown, ""
+	case strings.Contains(value, "/v1/images/generations"):
+		return constant.ChannelTypeOpenAI, "images-generations"
+	case strings.Contains(value, "/v1/audio/speech"):
+		return constant.ChannelTypeOpenAI, "audio-speech"
+	case strings.Contains(value, "/v1/audio/transcriptions"):
+		return constant.ChannelTypeOpenAI, "audio-transcriptions"
+	case strings.Contains(value, "/v1/audio/translations"):
+		return constant.ChannelTypeOpenAI, "audio-translations"
+	case strings.Contains(value, "/v1/embeddings"):
+		return constant.ChannelTypeOpenAI, "embeddings"
+	case strings.Contains(value, "/v1/rerank"):
+		return constant.ChannelTypeOpenAI, "rerank"
+	case strings.Contains(value, "/v1/moderations"):
+		return constant.ChannelTypeOpenAI, "moderations"
+	case strings.Contains(value, "/v1/realtime"):
+		return constant.ChannelTypeOpenAI, "realtime"
+	case strings.Contains(value, "/mj/submit/"):
+		return constant.ChannelTypeMidjourney, "mj-" + lastPathPart(value)
+	case strings.Contains(value, "/kling/") || strings.HasPrefix(strings.TrimPrefix(value, "/"), "kling/"):
+		return constant.ChannelTypeKling, "kling-" + lastPathPart(value)
+	case strings.Contains(value, "/minimax/v1/video_generation"):
+		return constant.ChannelTypeMiniMax, "minimax-video"
+	case strings.Contains(value, "/minimax/v1/t2a"):
+		return constant.ChannelTypeMiniMax, "minimax-audio"
+	case strings.Contains(value, "/volc/v1/contents/generations/tasks"):
+		return constant.ChannelTypeDoubaoVideo, "volc-generation-task"
+	case strings.Contains(value, "/alibailian/") && strings.Contains(value, "video-synthesis"):
+		return constant.ChannelTypeAli, "alibailian-video-synthesis"
+	case strings.Contains(value, "/openapi/v2/"):
+		return constant.ChannelTypeCustom, "pixverse-" + lastPathPart(value)
 	default:
-		return constant.ChannelTypeUnknown
+		return constant.ChannelTypeUnknown, ""
 	}
+}
+
+func resolveEndpointByLabel(label string) (int, string) {
+	value := normalizeEndpointText(label)
+	switch {
+	case value == "":
+		return constant.ChannelTypeUnknown, ""
+	case strings.Contains(value, "openai"):
+		return constant.ChannelTypeOpenAI, "openai"
+	case strings.Contains(value, "anthropic") || strings.Contains(value, "claude"):
+		return constant.ChannelTypeAnthropic, "anthropic"
+	case strings.Contains(value, "gemini") || strings.Contains(value, "geminitts"):
+		return constant.ChannelTypeGemini, "gemini"
+	case strings.Contains(value, "images-generations") || strings.Contains(value, "image-generation") || strings.Contains(value, "dall-e") || strings.Contains(value, "文本转语音") || strings.Contains(value, "语音转文字") || strings.Contains(value, "嵌入") || strings.Contains(value, "embedding") || strings.Contains(value, "rerank") || strings.Contains(value, "moderation") || strings.Contains(value, "realtime"):
+		return constant.ChannelTypeOpenAI, slug(label)
+	case strings.Contains(value, "mj"):
+		return constant.ChannelTypeMidjourney, slug(label)
+	case strings.Contains(value, "vidu"):
+		return constant.ChannelTypeVidu, slug(label)
+	case strings.Contains(value, "kling") || strings.Contains(value, "对口型") || strings.Contains(value, "文生音效") || strings.Contains(value, "视频生音效") || strings.Contains(value, "语音合成") || strings.Contains(value, "数字人") || strings.Contains(value, "视频特效") || strings.Contains(value, "动作控制") || strings.Contains(value, "omni-") || strings.Contains(value, "多模态视频编辑") || strings.Contains(value, "视频延长") || strings.Contains(value, "多图参考生视频"):
+		return constant.ChannelTypeKling, slug(label)
+	case strings.Contains(value, "sora"):
+		return constant.ChannelTypeSora, "sora"
+	case strings.Contains(value, "doubao") || strings.Contains(value, "seedance") || strings.Contains(value, "豆包"):
+		return constant.ChannelTypeDoubaoVideo, slug(label)
+	case strings.Contains(value, "grok") || strings.Contains(value, "xai"):
+		return constant.ChannelTypeXai, slug(label)
+	case strings.Contains(value, "ali") || strings.Contains(value, "dashscope") || strings.Contains(value, "wan") || strings.Contains(value, "万相"):
+		return constant.ChannelTypeAli, slug(label)
+	case strings.Contains(value, "suno"):
+		return constant.ChannelTypeSunoAPI, "suno"
+	case strings.Contains(value, "minimax") || strings.Contains(value, "hailuo") || strings.Contains(value, "海螺") || strings.Contains(value, "同步语音") || strings.Contains(value, "异步语音"):
+		return constant.ChannelTypeMiniMax, slug(label)
+	case strings.Contains(value, "pix") || strings.Contains(value, "图片模板") || strings.Contains(value, "主体替换") || strings.Contains(value, "动作模仿") || strings.Contains(value, "视频编辑") || strings.Contains(value, "重绘视频") || strings.Contains(value, "多帧") || strings.Contains(value, "音效"):
+		return constant.ChannelTypeCustom, slug(label)
+	default:
+		return constant.ChannelTypeUnknown, ""
+	}
+}
+
+func resolveEndpointByMetadata(item CatalogModel) (int, string) {
+	value := normalizeEndpointText(strings.Join([]string{item.Name, item.ModelType, item.Tags, item.Description}, " "))
+	switch {
+	case value == "":
+		return constant.ChannelTypeUnknown, ""
+	case strings.Contains(value, "embedding") || strings.Contains(value, "rerank") || strings.Contains(value, "检索") || strings.Contains(value, "tts") || strings.Contains(value, "whisper") || strings.Contains(value, "transcribe") || strings.Contains(value, "realtime") || strings.Contains(value, "moderation") || strings.Contains(value, "gpt-image") || strings.Contains(value, "qwen-image") || strings.Contains(value, "flux") || strings.Contains(value, "z-image") || strings.Contains(value, "grok-imagine") || strings.Contains(value, "图像"):
+		return constant.ChannelTypeOpenAI, "openai-compatible"
+	case strings.HasPrefix(strings.ToLower(item.Name), "mj_"):
+		return constant.ChannelTypeMidjourney, "midjourney"
+	case strings.Contains(value, "kling"):
+		return constant.ChannelTypeKling, "kling"
+	case strings.Contains(value, "pixverse"):
+		return constant.ChannelTypeCustom, "pixverse"
+	case strings.Contains(value, "hailuo") || strings.Contains(value, "minimax") || strings.Contains(value, "speech-"):
+		return constant.ChannelTypeMiniMax, "minimax"
+	case strings.Contains(value, "doubao-seedance") || strings.Contains(value, "doubao-seedream"):
+		return constant.ChannelTypeDoubaoVideo, "doubao"
+	case strings.Contains(value, "wan") || strings.Contains(value, "happyhorse"):
+		return constant.ChannelTypeAli, "ali-video"
+	case strings.Contains(value, "vidu"):
+		return constant.ChannelTypeVidu, "vidu"
+	default:
+		return constant.ChannelTypeUnknown, ""
+	}
+}
+
+func normalizeEndpointText(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "\\", "/")
+	return value
+}
+
+func lastPathPart(path string) string {
+	path = strings.Trim(strings.TrimSpace(path), "/")
+	if path == "" {
+		return "endpoint"
+	}
+	parts := strings.Split(path, "/")
+	return slug(parts[len(parts)-1])
+}
+
+func endpointPathAndMethod(value any) (string, string) {
+	if value == nil {
+		return "", ""
+	}
+	if object, ok := value.(map[string]any); ok {
+		return anyString(object["path"]), anyString(object["method"])
+	}
+	return "", ""
+}
+
+func anyString(value any) string {
+	if s, ok := value.(string); ok {
+		return s
+	}
+	return ""
 }
 
 func endpointNameForChannelType(channelType int) string {
@@ -826,6 +975,90 @@ func channelTypeModelCounts(plans []channelPlan) map[string]int {
 	for name, models := range modelsByType {
 		out[name] = len(models)
 	}
+	return out
+}
+
+func resolvedEndpointReports(plans []channelPlan) []EndpointResolution {
+	type bucket struct {
+		report EndpointResolution
+		models map[string]struct{}
+	}
+	buckets := map[string]*bucket{}
+	for _, plan := range plans {
+		key := fmt.Sprintf("%d|%s|%s|%s", plan.Type, plan.Endpoint, plan.EndpointPath, plan.ResolutionSource)
+		item, ok := buckets[key]
+		if !ok {
+			item = &bucket{
+				report: EndpointResolution{
+					Endpoint:    plan.Endpoint,
+					Path:        plan.EndpointPath,
+					Method:      plan.EndpointMethod,
+					ChannelType: constant.GetChannelTypeName(plan.Type),
+					Source:      plan.ResolutionSource,
+				},
+				models: map[string]struct{}{},
+			}
+			buckets[key] = item
+		}
+		for _, modelName := range plan.Models {
+			item.models[modelName] = struct{}{}
+		}
+	}
+	out := make([]EndpointResolution, 0, len(buckets))
+	for _, item := range buckets {
+		item.report.Models = len(item.models)
+		out = append(out, item.report)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ChannelType != out[j].ChannelType {
+			return out[i].ChannelType < out[j].ChannelType
+		}
+		if out[i].Endpoint != out[j].Endpoint {
+			return out[i].Endpoint < out[j].Endpoint
+		}
+		return out[i].Path < out[j].Path
+	})
+	return out
+}
+
+func unresolvedEndpointReports(catalog *ProviderCatalog) []EndpointResolution {
+	if catalog == nil {
+		return nil
+	}
+	out := []EndpointResolution{}
+	for _, item := range catalog.Models {
+		if strings.TrimSpace(item.Name) == "" || len(endpointSpecsForModel(item)) > 0 {
+			continue
+		}
+		endpoints := item.SupportedEndpointTypes
+		if len(endpoints) == 0 {
+			out = append(out, EndpointResolution{
+				ModelName: item.Name,
+				ModelType: item.ModelType,
+				Tags:      item.Tags,
+				Reason:    "模型没有 supported_endpoint_types，也没有 channel_type",
+			})
+			continue
+		}
+		for _, endpoint := range endpoints {
+			path, method := endpointPathAndMethod(item.EndpointMap[endpoint])
+			out = append(out, EndpointResolution{
+				ModelName: item.Name,
+				Endpoint:  endpoint,
+				Path:      path,
+				Method:    method,
+				ModelType: item.ModelType,
+				Tags:      item.Tags,
+				Reason:    "endpoint label、path 和模型元数据都无法映射到渠道类型",
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ModelName != out[j].ModelName {
+			return out[i].ModelName < out[j].ModelName
+		}
+		return out[i].Endpoint < out[j].Endpoint
+	})
 	return out
 }
 
