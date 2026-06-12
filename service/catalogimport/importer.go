@@ -140,6 +140,11 @@ func buildTaskBillingRules(catalog *ProviderCatalog) map[string]task_billing_rul
 					rule.FixedDuration, _ = strconv.Atoi(match[1])
 				}
 				result[item.Name] = rule
+			} else if strings.HasPrefix(name, "veo_3_1_") && strings.HasSuffix(name, "_vip") {
+				result[item.Name] = task_billing_rules.Rule{
+					Mode:          task_billing_rules.ModePerCall,
+					FixedDuration: 8,
+				}
 			} else if name == "sora-2-all" {
 				result[item.Name] = task_billing_rules.Rule{
 					Mode:      task_billing_rules.ModePerUnit,
