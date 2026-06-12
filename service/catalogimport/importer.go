@@ -134,26 +134,42 @@ func buildTaskBillingRules(catalog *ProviderCatalog) map[string]task_billing_rul
 		name := strings.ToLower(item.Name)
 		endpoints := strings.ToLower(strings.Join(item.SupportedEndpointTypes, ","))
 		if item.QuotaType == 1 && (strings.Contains(endpoints, "视频") || strings.Contains(endpoints, "video")) {
-			if strings.HasPrefix(name, "grok-video-") {
-				rule := task_billing_rules.Rule{Mode: task_billing_rules.ModePerCall}
-				if match := regexp.MustCompile(`-(\d+)s$`).FindStringSubmatch(name); len(match) == 2 {
-					rule.FixedDuration, _ = strconv.Atoi(match[1])
-				}
-				result[item.Name] = rule
-			} else if strings.HasPrefix(name, "veo_3_1_") && strings.HasSuffix(name, "_vip") {
-				result[item.Name] = task_billing_rules.Rule{
-					Mode:          task_billing_rules.ModePerCall,
-					FixedDuration: 8,
-				}
-			} else if name == "sora-2-all" {
+			if name == "sora-2-all" {
 				result[item.Name] = task_billing_rules.Rule{
 					Mode:      task_billing_rules.ModePerUnit,
 					RatioKeys: []string{"seconds", "size"},
+				}
+			} else if isFixedPriceTaskModel(item) {
+				result[item.Name] = task_billing_rules.Rule{
+					Mode:          task_billing_rules.ModePerCall,
+					FixedDuration: fixedTaskDuration(item),
 				}
 			}
 		}
 	}
 	return result
+}
+
+func isFixedPriceTaskModel(item CatalogModel) bool {
+	return item.ModelPrice > 0 && item.ModelRatio == 0
+}
+
+func fixedTaskDuration(item CatalogModel) int {
+	values := []string{strings.ToLower(item.Name), strings.ToLower(item.Description)}
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`-(\d+)\s*s$`),
+		regexp.MustCompile(`(\d+)\s*s`),
+		regexp.MustCompile(`(\d+)\s*秒`),
+	}
+	for _, value := range values {
+		for _, pattern := range patterns {
+			if match := pattern.FindStringSubmatch(value); len(match) == 2 {
+				duration, _ := strconv.Atoi(match[1])
+				return duration
+			}
+		}
+	}
+	return 0
 }
 
 func ambiguousTaskBillingModels(catalog *ProviderCatalog) []string {

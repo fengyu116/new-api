@@ -188,21 +188,21 @@ func TestParseVectorBundleGeneratesTaskBillingRules(t *testing.T) {
 	}
 }
 
-func TestParseVectorBundleGeneratesVeo31FixedDurationTaskBillingRules(t *testing.T) {
+func TestParseVectorBundleGeneratesFixedPriceTaskBillingRules(t *testing.T) {
 	normal := []byte(`{
 		"vendors":[],
 		"data":[
 			{
-				"model_name":"veo_3_1_vip",
-				"description":"Google veo3.1 高质量模式（时长8秒）",
+				"model_name":"supplier-video-fixed-vip",
+				"description":"供应商固定价视频模型（时长8秒）",
 				"quota_type":1,
 				"model_price":1.7,
 				"enable_groups":["default"],
 				"supported_endpoint_types":["openAI视频格式"]
 			},
 			{
-				"model_name":"veo_3_1_fast_components_vip",
-				"description":"Google veo3.1 支持三张垫图输入（时长8秒）",
+				"model_name":"another-video-model",
+				"description":"另一个固定价视频模型，6S。",
 				"quota_type":1,
 				"model_price":1.6,
 				"enable_groups":["default"],
@@ -222,12 +222,15 @@ func TestParseVectorBundleGeneratesVeo31FixedDurationTaskBillingRules(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, modelName := range []string{"veo_3_1_vip", "veo_3_1_fast_components_vip"} {
+	for modelName, fixedDuration := range map[string]int{
+		"supplier-video-fixed-vip": 8,
+		"another-video-model":      6,
+	} {
 		rule, ok := catalog.TaskBillingRules[modelName]
 		if !ok {
 			t.Fatalf("expected fixed-duration task billing rule for %s", modelName)
 		}
-		if rule.Mode != task_billing_rules.ModePerCall || rule.FixedDuration != 8 || len(rule.RatioKeys) != 0 {
+		if rule.Mode != task_billing_rules.ModePerCall || rule.FixedDuration != fixedDuration || len(rule.RatioKeys) != 0 {
 			t.Fatalf("unexpected task billing rule for %s: %+v", modelName, rule)
 		}
 	}
