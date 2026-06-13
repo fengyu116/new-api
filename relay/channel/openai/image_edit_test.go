@@ -2,6 +2,8 @@ package openai
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -94,5 +96,121 @@ func TestConvertImageEditRequestMultipart(t *testing.T) {
 		c.Request.PostForm = nil
 
 		convertAndReplay(t, c, prompt)
+	})
+}
+
+func TestConvertImageEditRequestJSONDataURLs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	newContext := func() *gin.Context {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/edits", bytes.NewReader(nil))
+		c.Request.Header.Set("Content-Type", "application/json")
+		return c
+	}
+
+	dataURL := func(mimeType string, data []byte) string {
+		return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data)
+	}
+
+	t.Run("single image keeps fields and bytes", func(t *testing.T) {
+		c := newContext()
+		imageBytes := []byte("single-image-bytes")
+		request := dto.ImageRequest{
+			Model:          "gpt-image-2",
+			Prompt:         "edit this image",
+			N:              common.GetPointer(uint(1)),
+			Size:           "1024x1536",
+			Quality:        "standard",
+			ResponseFormat: "b64_json",
+			Image:          json.RawMessage(`"` + dataURL("image/jpeg", imageBytes) + `"`),
+			Extra: map[string]json.RawMessage{
+				"metadata": json.RawMessage(`{"aspectRatio":"9:16"}`),
+			},
+		}
+
+		converted, err := (&Adaptor{}).ConvertImageRequest(c, &relaycommon.RelayInfo{
+			RelayMode: relayconstant.RelayModeImagesEdits,
+		}, request)
+		require.NoError(t, err)
+
+		body, ok := converted.(*bytes.Buffer)
+		require.True(t, ok)
+		replayed := httptest.NewRequest(http.MethodPost, "/v1/images/edits", bytes.NewReader(body.Bytes()))
+		replayed.Header.Set("Content-Type", c.Request.Header.Get("Content-Type"))
+		require.NoError(t, replayed.ParseMultipartForm(32<<20))
+		require.Equal(t, "gpt-image-2", replayed.PostForm.Get("model"))
+		require.Equal(t, "edit this image", replayed.PostForm.Get("prompt"))
+		require.Equal(t, "1024x1536", replayed.PostForm.Get("size"))
+		require.Equal(t, "standard", replayed.PostForm.Get("quality"))
+		require.Equal(t, `{"aspectRatio":"9:16"}`, replayed.PostForm.Get("metadata"))
+		require.Len(t, replayed.MultipartForm.File["image"], 1)
+
+		file, err := replayed.MultipartForm.File["image"][0].Open()
+		require.NoError(t, err)
+		defer file.Close()
+		actual, err := io.ReadAll(file)
+		require.NoError(t, err)
+		require.Equal(t, imageBytes, actual)
+		require.Equal(t, "image/jpeg", replayed.MultipartForm.File["image"][0].Header.Get("Content-Type"))
+	})
+
+	t.Run("multiple images preserve order", func(t *testing.T) {
+		c := newContext()
+		first := []byte("first-image")
+		second := []byte("second-image")
+		images, err := json.Marshal([]string{
+			dataURL("image/png", first),
+			dataURL("image/webp", second),
+		})
+		require.NoError(t, err)
+		request := dto.ImageRequest{
+			Model:  "gpt-image-2",
+			Prompt: "combine references",
+			Images: images,
+		}
+
+		converted, err := (&Adaptor{}).ConvertImageRequest(c, &relaycommon.RelayInfo{
+			RelayMode: relayconstant.RelayModeImagesEdits,
+		}, request)
+		require.NoError(t, err)
+
+		body := converted.(*bytes.Buffer)
+		replayed := httptest.NewRequest(http.MethodPost, "/v1/images/edits", bytes.NewReader(body.Bytes()))
+		replayed.Header.Set("Content-Type", c.Request.Header.Get("Content-Type"))
+		require.NoError(t, replayed.ParseMultipartForm(32<<20))
+		files := replayed.MultipartForm.File["image[]"]
+		require.Len(t, files, 2)
+		for index, expected := range [][]byte{first, second} {
+			file, err := files[index].Open()
+			require.NoError(t, err)
+			actual, err := io.ReadAll(file)
+			require.NoError(t, err)
+			require.NoError(t, file.Close())
+			require.Equal(t, expected, actual)
+		}
+		require.Equal(t, "image/png", files[0].Header.Get("Content-Type"))
+		require.Equal(t, "image/webp", files[1].Header.Get("Content-Type"))
+	})
+
+	t.Run("rejects remote URLs and invalid base64", func(t *testing.T) {
+		for name, image := range map[string]string{
+			"remote URL":     "https://example.com/image.png",
+			"invalid base64": "data:image/png;base64,not-valid-***",
+		} {
+			t.Run(name, func(t *testing.T) {
+				c := newContext()
+				raw, err := json.Marshal(image)
+				require.NoError(t, err)
+				_, err = (&Adaptor{}).ConvertImageRequest(c, &relaycommon.RelayInfo{
+					RelayMode: relayconstant.RelayModeImagesEdits,
+				}, dto.ImageRequest{
+					Model:  "gpt-image-2",
+					Prompt: "edit",
+					Image:  raw,
+				})
+				require.Error(t, err)
+			})
+		}
 	})
 }

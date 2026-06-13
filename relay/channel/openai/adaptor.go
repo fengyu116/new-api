@@ -2,6 +2,7 @@ package openai
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -430,7 +431,7 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 	switch info.RelayMode {
 	case relayconstant.RelayModeImagesEdits:
 		if isJSONRequest(c) {
-			return request, nil
+			return convertJSONImageEditRequest(c, request)
 		}
 
 		var requestBody bytes.Buffer
@@ -557,6 +558,176 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 
 	default:
 		return request, nil
+	}
+}
+
+func convertJSONImageEditRequest(c *gin.Context, request dto.ImageRequest) (*bytes.Buffer, error) {
+	images, err := imageEditDataURLs(request)
+	if err != nil {
+		return nil, err
+	}
+
+	var requestBody bytes.Buffer
+	writer := multipart.NewWriter(&requestBody)
+	closed := false
+	defer func() {
+		if !closed {
+			_ = writer.Close()
+		}
+	}()
+
+	if err := writeJSONImageEditFields(writer, request); err != nil {
+		return nil, err
+	}
+
+	fieldName := "image"
+	if len(images) > 1 {
+		fieldName = "image[]"
+	}
+	for index, dataURL := range images {
+		if err := writeDataURLFile(writer, fieldName, fmt.Sprintf("image-%d", index+1), dataURL); err != nil {
+			return nil, fmt.Errorf("invalid image %d: %w", index+1, err)
+		}
+	}
+
+	if len(request.Mask) > 0 && string(request.Mask) != "null" {
+		mask, err := rawJSONString(request.Mask)
+		if err != nil {
+			return nil, fmt.Errorf("mask must be a data URL string: %w", err)
+		}
+		if err := writeDataURLFile(writer, "mask", "mask", mask); err != nil {
+			return nil, fmt.Errorf("invalid mask: %w", err)
+		}
+	}
+
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("failed to finish multipart image edit request: %w", err)
+	}
+	closed = true
+	c.Request.Header.Set("Content-Type", writer.FormDataContentType())
+	return &requestBody, nil
+}
+
+func imageEditDataURLs(request dto.ImageRequest) ([]string, error) {
+	raw := request.Images
+	if len(raw) == 0 || string(raw) == "null" || string(raw) == "[]" {
+		raw = request.Image
+	}
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, errors.New("image is required")
+	}
+
+	var images []string
+	if err := common.Unmarshal(raw, &images); err == nil {
+		if len(images) == 0 {
+			return nil, errors.New("image is required")
+		}
+		return images, nil
+	}
+
+	image, err := rawJSONString(raw)
+	if err != nil {
+		return nil, errors.New("image must be a data URL string or images must be an array of data URL strings")
+	}
+	if strings.TrimSpace(image) == "" {
+		return nil, errors.New("image is required")
+	}
+	return []string{image}, nil
+}
+
+func writeJSONImageEditFields(writer *multipart.Writer, request dto.ImageRequest) error {
+	data, err := common.Marshal(request)
+	if err != nil {
+		return fmt.Errorf("failed to serialize image edit request: %w", err)
+	}
+	fields := make(map[string]json.RawMessage)
+	if err := common.Unmarshal(data, &fields); err != nil {
+		return fmt.Errorf("failed to parse image edit fields: %w", err)
+	}
+	for key, value := range request.Extra {
+		if _, exists := fields[key]; !exists {
+			fields[key] = value
+		}
+	}
+	delete(fields, "image")
+	delete(fields, "images")
+	delete(fields, "mask")
+
+	for key, raw := range fields {
+		if len(raw) == 0 || string(raw) == "null" {
+			continue
+		}
+		value := common.JsonRawMessageToString(raw)
+		if err := writer.WriteField(key, value); err != nil {
+			return fmt.Errorf("failed to write image edit field %s: %w", key, err)
+		}
+	}
+	return nil
+}
+
+func rawJSONString(raw json.RawMessage) (string, error) {
+	var value string
+	if err := common.Unmarshal(raw, &value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func writeDataURLFile(writer *multipart.Writer, fieldName string, filenamePrefix string, dataURL string) error {
+	value := strings.TrimSpace(dataURL)
+	comma := strings.IndexByte(value, ',')
+	if comma <= len("data:") || !strings.HasPrefix(strings.ToLower(value), "data:") {
+		return errors.New("only base64 data URLs are supported")
+	}
+
+	header := value[len("data:"):comma]
+	headerParts := strings.Split(header, ";")
+	mimeType := strings.ToLower(strings.TrimSpace(headerParts[0]))
+	if !strings.HasPrefix(mimeType, "image/") {
+		return fmt.Errorf("unsupported media type %q", mimeType)
+	}
+	isBase64 := false
+	for _, part := range headerParts[1:] {
+		if strings.EqualFold(strings.TrimSpace(part), "base64") {
+			isBase64 = true
+			break
+		}
+	}
+	if !isBase64 {
+		return errors.New("data URL must use base64 encoding")
+	}
+
+	extension := imageExtensionForMIME(mimeType)
+	partHeader := make(textproto.MIMEHeader)
+	partHeader.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s.%s"`, fieldName, filenamePrefix, extension))
+	partHeader.Set("Content-Type", mimeType)
+	part, err := writer.CreatePart(partHeader)
+	if err != nil {
+		return fmt.Errorf("failed to create multipart file: %w", err)
+	}
+
+	payload := value[comma+1:]
+	if payload == "" {
+		return errors.New("base64 payload is empty")
+	}
+	if _, err := io.Copy(part, base64.NewDecoder(base64.StdEncoding, strings.NewReader(payload))); err != nil {
+		return fmt.Errorf("failed to decode base64 payload: %w", err)
+	}
+	return nil
+}
+
+func imageExtensionForMIME(mimeType string) string {
+	switch mimeType {
+	case "image/jpeg":
+		return "jpg"
+	case "image/webp":
+		return "webp"
+	case "image/gif":
+		return "gif"
+	case "image/bmp":
+		return "bmp"
+	default:
+		return "png"
 	}
 }
 
