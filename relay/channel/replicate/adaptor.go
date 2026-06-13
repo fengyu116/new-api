@@ -18,6 +18,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	relayhelper "github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
 
@@ -125,7 +126,21 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 	}
 
 	if info.RelayMode == relayconstant.RelayModeImagesEdits {
-		imageURL, err := uploadFileFromForm(c, info, "image", "image[]", "image_prompt")
+		var imageURL string
+		var err error
+		if relayhelper.HasImageReferences(request) {
+			references, parseErr := relayhelper.ImageReferences(request)
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			parsed, parseErr := relayhelper.ParseImageDataURL(references[0])
+			if parseErr != nil {
+				return nil, fmt.Errorf("replicate adaptor: invalid image reference: %w", parseErr)
+			}
+			imageURL, err = uploadFileReader(info, "image."+parsed.Extension, parsed.MIMEType, parsed.Decoder())
+		} else {
+			imageURL, err = uploadFileFromForm(c, info, "image", "image[]", "image_prompt")
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -442,12 +457,19 @@ func uploadFileFromForm(c *gin.Context, info *relaycommon.RelayInfo, fieldCandid
 	}
 	defer file.Close()
 
+	contentType := fileHeader.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return uploadFileReader(info, fileHeader.Filename, contentType, file)
+}
+
+func uploadFileReader(info *relaycommon.RelayInfo, filename string, contentType string, reader io.Reader) (string, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
 	hdr := make(textproto.MIMEHeader)
-	hdr.Set("Content-Disposition", fmt.Sprintf("form-data; name=\"content\"; filename=\"%s\"", fileHeader.Filename))
-	contentType := fileHeader.Header.Get("Content-Type")
+	hdr.Set("Content-Disposition", fmt.Sprintf("form-data; name=\"content\"; filename=\"%s\"", filename))
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
@@ -458,7 +480,7 @@ func uploadFileFromForm(c *gin.Context, info *relaycommon.RelayInfo, fieldCandid
 		writer.Close()
 		return "", fmt.Errorf("replicate adaptor: create upload form failed: %w", err)
 	}
-	if _, err := io.Copy(part, file); err != nil {
+	if _, err := io.Copy(part, reader); err != nil {
 		writer.Close()
 		return "", fmt.Errorf("replicate adaptor: copy image content failed: %w", err)
 	}

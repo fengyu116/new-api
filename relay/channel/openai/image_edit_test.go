@@ -113,6 +113,39 @@ func TestConvertImageEditRequestJSONDataURLs(t *testing.T) {
 		return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data)
 	}
 
+	t.Run("all OpenAI-compatible edit model names use the same conversion", func(t *testing.T) {
+		for _, modelName := range []string{
+			"gpt-image-1",
+			"gpt-image-1-mini",
+			"gpt-image-1.5",
+			"gpt-image-2",
+			"gpt-image-2-vip",
+		} {
+			t.Run(modelName, func(t *testing.T) {
+				c := newContext()
+				imageBytes := []byte("model-agnostic-image")
+				rawImage, err := json.Marshal(dataURL("image/jpeg", imageBytes))
+				require.NoError(t, err)
+
+				converted, err := (&Adaptor{}).ConvertImageRequest(c, &relaycommon.RelayInfo{
+					RelayMode: relayconstant.RelayModeImagesEdits,
+				}, dto.ImageRequest{
+					Model:  modelName,
+					Prompt: "edit",
+					Image:  rawImage,
+				})
+				require.NoError(t, err)
+
+				body := converted.(*bytes.Buffer)
+				replayed := httptest.NewRequest(http.MethodPost, "/v1/images/edits", bytes.NewReader(body.Bytes()))
+				replayed.Header.Set("Content-Type", c.Request.Header.Get("Content-Type"))
+				require.NoError(t, replayed.ParseMultipartForm(32<<20))
+				require.Equal(t, modelName, replayed.PostForm.Get("model"))
+				require.Len(t, replayed.MultipartForm.File["image"], 1)
+			})
+		}
+	})
+
 	t.Run("single image keeps fields and bytes", func(t *testing.T) {
 		c := newContext()
 		imageBytes := []byte("single-image-bytes")
@@ -213,4 +246,5 @@ func TestConvertImageEditRequestJSONDataURLs(t *testing.T) {
 			})
 		}
 	})
+
 }

@@ -19,6 +19,7 @@ import (
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/task_billing_rules"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
@@ -168,6 +169,9 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	if taskErr := adaptor.ValidateRequestAndSetAction(c, info); taskErr != nil {
 		return nil, taskErr
 	}
+	if accessErr := validateTaskDataURLAccess(c, info); accessErr != nil {
+		return nil, service.TaskErrorFromAPIError(accessErr)
+	}
 
 	// 2. 确定模型名称
 	modelName := info.OriginModelName
@@ -277,6 +281,36 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		Platform:       platform,
 		Quota:          finalQuota,
 	}, nil
+}
+
+func validateTaskDataURLAccess(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIError {
+	if c == nil || !strings.HasPrefix(c.GetHeader("Content-Type"), "application/json") {
+		return nil
+	}
+	storage, err := common.GetBodyStorage(c)
+	if err != nil {
+		return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+	}
+	body, err := storage.Bytes()
+	if err != nil {
+		return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+	}
+	if !helper.HasJSONImageDataURLReferences(body) {
+		return nil
+	}
+	userID := 0
+	if info != nil {
+		userID = info.UserId
+	}
+	if model_setting.IsImageEditDataURLConversionAllowed(userID) {
+		return nil
+	}
+	return types.NewErrorWithStatusCode(
+		fmt.Errorf("user %d is not allowed to use JSON Data URL reference image conversion", userID),
+		types.ErrorCodeAccessDenied,
+		http.StatusForbidden,
+		types.ErrOptionWithSkipRetry(),
+	)
 }
 
 func applyConfiguredTaskBilling(

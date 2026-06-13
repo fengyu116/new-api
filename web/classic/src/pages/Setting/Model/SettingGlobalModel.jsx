@@ -44,6 +44,23 @@ const thinkingExample = JSON.stringify(
   2,
 );
 
+const imageEditDataURLWhitelistExample = JSON.stringify([1, 7, 12], null, 2);
+
+const imageEditDataURLBlacklistExample = JSON.stringify([23, 45], null, 2);
+
+const verifyUserIDListJSON = (value) => {
+  if (!value || value.trim() === '') return true;
+  try {
+    const parsed = JSON.parse(value);
+    return (
+      Array.isArray(parsed) &&
+      parsed.every((userId) => Number.isInteger(userId) && userId > 0)
+    );
+  } catch {
+    return false;
+  }
+};
+
 const chatCompletionsToResponsesPolicyExample = JSON.stringify(
   {
     enabled: true,
@@ -69,6 +86,8 @@ const chatCompletionsToResponsesPolicyAllChannelsExample = JSON.stringify(
 const defaultGlobalSettingInputs = {
   'global.pass_through_request_enabled': false,
   'global.thinking_model_blacklist': '[]',
+  'global.image_edit_data_url_user_whitelist': '[]',
+  'global.image_edit_data_url_user_blacklist': '[]',
   'global.chat_completions_to_responses_policy': '{}',
   'general_setting.ping_interval_enabled': false,
   'general_setting.ping_interval_seconds': 60,
@@ -95,7 +114,11 @@ export default function SettingGlobalModel(props) {
   };
 
   const normalizeValueBeforeSave = (key, value) => {
-    if (key === 'global.thinking_model_blacklist') {
+    if (
+      key === 'global.thinking_model_blacklist' ||
+      key === 'global.image_edit_data_url_user_whitelist' ||
+      key === 'global.image_edit_data_url_user_blacklist'
+    ) {
       const text = typeof value === 'string' ? value.trim() : '';
       return text === '' ? '[]' : value;
     }
@@ -146,7 +169,11 @@ export default function SettingGlobalModel(props) {
     for (const key of Object.keys(defaultGlobalSettingInputs)) {
       if (props.options[key] !== undefined) {
         let value = props.options[key];
-        if (key === 'global.thinking_model_blacklist') {
+        if (
+          key === 'global.thinking_model_blacklist' ||
+          key === 'global.image_edit_data_url_user_whitelist' ||
+          key === 'global.image_edit_data_url_user_blacklist'
+        ) {
           try {
             value =
               value && String(value).trim() !== ''
@@ -228,6 +255,64 @@ export default function SettingGlobalModel(props) {
                     setInputs({
                       ...inputs,
                       'global.thinking_model_blacklist': value,
+                    })
+                  }
+                />
+              </Col>
+            </Row>
+
+            <Divider margin='12px' />
+            <Row>
+              <Col span={24}>
+                <Banner
+                  type='info'
+                  description={t(
+                    '参考图 Data URL 转换仅处理 JSON 请求；原 multipart 请求保持原流程。名单填写用户 ID，黑名单优先，白名单为空时允许所有已认证用户。',
+                  )}
+                />
+              </Col>
+            </Row>
+            <Row style={{ marginTop: 10 }}>
+              <Col xs={24} sm={12}>
+                <Form.TextArea
+                  label={t('参考图 Data URL 转换用户 ID 白名单')}
+                  field={'global.image_edit_data_url_user_whitelist'}
+                  placeholder={
+                    t('例如：') + '\n' + imageEditDataURLWhitelistExample
+                  }
+                  rows={4}
+                  rules={[
+                    {
+                      validator: (rule, value) => verifyUserIDListJSON(value),
+                      message: t('必须是正整数用户 ID 的 JSON 数组'),
+                    },
+                  ]}
+                  onChange={(value) =>
+                    setInputs({
+                      ...inputs,
+                      'global.image_edit_data_url_user_whitelist': value,
+                    })
+                  }
+                />
+              </Col>
+              <Col xs={24} sm={12}>
+                <Form.TextArea
+                  label={t('参考图 Data URL 转换用户 ID 黑名单')}
+                  field={'global.image_edit_data_url_user_blacklist'}
+                  placeholder={
+                    t('例如：') + '\n' + imageEditDataURLBlacklistExample
+                  }
+                  rows={4}
+                  rules={[
+                    {
+                      validator: (rule, value) => verifyUserIDListJSON(value),
+                      message: t('必须是正整数用户 ID 的 JSON 数组'),
+                    },
+                  ]}
+                  onChange={(value) =>
+                    setInputs({
+                      ...inputs,
+                      'global.image_edit_data_url_user_blacklist': value,
                     })
                   }
                 />

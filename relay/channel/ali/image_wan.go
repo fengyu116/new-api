@@ -7,6 +7,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayhelper "github.com/QuantumNous/new-api/relay/helper"
 
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
@@ -36,6 +37,26 @@ func oaiFormEdit2WanxImageEdit(c *gin.Context, info *relaycommon.RelayInfo, requ
 	}
 	info.PriceData.AddOtherRatio("n", float64(imageRequest.Parameters.N))
 
+	return &imageRequest, nil
+}
+
+func oaiJSONEdit2WanxImageEdit(info *relaycommon.RelayInfo, request dto.ImageRequest) (*AliImageRequest, error) {
+	images, err := relayhelper.ImageReferences(request)
+	if err != nil {
+		return nil, err
+	}
+	imageRequest := AliImageRequest{
+		Model:          request.Model,
+		ResponseFormat: request.ResponseFormat,
+		Input: WanImageInput{
+			Prompt: request.Prompt,
+			Images: images,
+		},
+		Parameters: AliImageParameters{
+			N: int(lo.FromPtrOr(request.N, uint(1))),
+		},
+	}
+	info.PriceData.AddOtherRatio("n", float64(imageRequest.Parameters.N))
 	return &imageRequest, nil
 }
 

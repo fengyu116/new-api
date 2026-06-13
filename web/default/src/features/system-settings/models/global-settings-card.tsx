@@ -53,6 +53,10 @@ const thinkingBlacklistExample = JSON.stringify(
   2
 )
 
+const imageEditDataURLWhitelistExample = JSON.stringify([1, 7, 12], null, 2)
+
+const imageEditDataURLBlacklistExample = JSON.stringify([23, 45], null, 2)
+
 const chatToResponsesPolicyExample = JSON.stringify(
   {
     enabled: true,
@@ -85,10 +89,26 @@ const jsonString = z.string().refine((value) => {
   }
 }, 'Invalid JSON format')
 
+const userIDListJsonString = z.string().refine((value) => {
+  const trimmed = value.trim()
+  if (!trimmed) return true
+  try {
+    const parsed = JSON.parse(trimmed)
+    return (
+      Array.isArray(parsed) &&
+      parsed.every((userID) => Number.isInteger(userID) && userID > 0)
+    )
+  } catch {
+    return false
+  }
+}, 'Must be a JSON array of positive integer user IDs')
+
 const schema = z.object({
   global: z.object({
     pass_through_request_enabled: z.boolean(),
     thinking_model_blacklist: jsonString,
+    image_edit_data_url_user_whitelist: userIDListJsonString,
+    image_edit_data_url_user_blacklist: userIDListJsonString,
     chat_completions_to_responses_policy: jsonString,
   }),
   general_setting: z.object({
@@ -103,6 +123,8 @@ type GlobalModelSettingsFormInput = z.input<typeof schema>
 type FlatGlobalModelSettings = {
   'global.pass_through_request_enabled': boolean
   'global.thinking_model_blacklist': string
+  'global.image_edit_data_url_user_whitelist': string
+  'global.image_edit_data_url_user_blacklist': string
   'global.chat_completions_to_responses_policy': string
   'general_setting.ping_interval_enabled': boolean
   'general_setting.ping_interval_seconds': number
@@ -115,6 +137,14 @@ const flattenGlobalValues = (
     values.global.pass_through_request_enabled,
   'global.thinking_model_blacklist': normalizeJsonText(
     values.global.thinking_model_blacklist,
+    '[]'
+  ),
+  'global.image_edit_data_url_user_whitelist': normalizeJsonText(
+    values.global.image_edit_data_url_user_whitelist,
+    '[]'
+  ),
+  'global.image_edit_data_url_user_blacklist': normalizeJsonText(
+    values.global.image_edit_data_url_user_blacklist,
     '[]'
   ),
   'global.chat_completions_to_responses_policy': normalizeJsonText(
@@ -158,6 +188,8 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
   const formatJsonField = (
     field:
       | 'global.thinking_model_blacklist'
+      | 'global.image_edit_data_url_user_whitelist'
+      | 'global.image_edit_data_url_user_blacklist'
       | 'global.chat_completions_to_responses_policy'
   ) => {
     const raw = form.getValues(field)
@@ -259,6 +291,87 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
               </FormItem>
             )}
           />
+
+          <Separator />
+
+          <div className='space-y-4'>
+            <div>
+              <h3 className='text-base font-semibold'>
+                {t('Reference image Data URL conversion')}
+              </h3>
+              <p className='text-muted-foreground text-sm'>
+                {t(
+                  'Applies only to JSON reference image requests that require server-side multipart or file upload conversion. Existing multipart requests are not affected.'
+                )}
+              </p>
+            </div>
+
+            <FormField
+              control={form.control}
+              name='global.image_edit_data_url_user_whitelist'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Conversion user ID whitelist')}</FormLabel>
+                  <FormControl>
+                    <Textarea
+                      rows={4}
+                      placeholder={`${t('Example:')}\n${imageEditDataURLWhitelistExample}`}
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t('Empty means all authenticated users are allowed.')}
+                  </FormDescription>
+                  <Button
+                    type='button'
+                    variant='outline'
+                    size='sm'
+                    onClick={() =>
+                      formatJsonField(
+                        'global.image_edit_data_url_user_whitelist'
+                      )
+                    }
+                  >
+                    {t('Format JSON')}
+                  </Button>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='global.image_edit_data_url_user_blacklist'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Conversion user ID blacklist')}</FormLabel>
+                  <FormControl>
+                    <Textarea
+                      rows={4}
+                      placeholder={`${t('Example:')}\n${imageEditDataURLBlacklistExample}`}
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t('Blacklist takes precedence over whitelist.')}
+                  </FormDescription>
+                  <Button
+                    type='button'
+                    variant='outline'
+                    size='sm'
+                    onClick={() =>
+                      formatJsonField(
+                        'global.image_edit_data_url_user_blacklist'
+                      )
+                    }
+                  >
+                    {t('Format JSON')}
+                  </Button>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
 
           <Separator />
 

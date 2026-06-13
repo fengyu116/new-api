@@ -26,6 +26,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel"
 	taskcommon "github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayhelper "github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
 )
 
@@ -164,6 +165,9 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 			req.Images = images
 		}
 	}
+	if err := normalizeImageDataURLReferences(&req); err != nil {
+		return nil, err
+	}
 
 	body, err := a.convertToRequestPayload(&req, info)
 	if err != nil {
@@ -174,6 +178,26 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 		return nil, err
 	}
 	return bytes.NewReader(data), nil
+}
+
+func normalizeImageDataURLReferences(req *relaycommon.TaskSubmitReq) error {
+	if req == nil || len(req.Images) == 0 {
+		return nil
+	}
+	normalized := make([]string, len(req.Images))
+	for index, image := range req.Images {
+		if relayhelper.IsImageDataURL(image) {
+			parsed, err := relayhelper.ParseImageDataURL(image)
+			if err != nil {
+				return fmt.Errorf("invalid image %d: %w", index+1, err)
+			}
+			normalized[index] = parsed.Base64Payload()
+			continue
+		}
+		normalized[index] = image
+	}
+	req.Images = normalized
+	return nil
 }
 
 // DoRequest delegates to common helper.

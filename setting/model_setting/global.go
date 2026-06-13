@@ -35,6 +35,8 @@ func (p ChatCompletionsToResponsesPolicy) IsChannelEnabled(channelID int, channe
 type GlobalSettings struct {
 	PassThroughRequestEnabled        bool                             `json:"pass_through_request_enabled"`
 	ThinkingModelBlacklist           []string                         `json:"thinking_model_blacklist"`
+	ImageEditDataURLUserWhitelist    []int                            `json:"image_edit_data_url_user_whitelist"`
+	ImageEditDataURLUserBlacklist    []int                            `json:"image_edit_data_url_user_blacklist"`
 	ChatCompletionsToResponsesPolicy ChatCompletionsToResponsesPolicy `json:"chat_completions_to_responses_policy"`
 }
 
@@ -45,6 +47,8 @@ var defaultOpenaiSettings = GlobalSettings{
 		"moonshotai/kimi-k2-thinking",
 		"kimi-k2-thinking",
 	},
+	ImageEditDataURLUserWhitelist: []int{},
+	ImageEditDataURLUserBlacklist: []int{},
 	ChatCompletionsToResponsesPolicy: ChatCompletionsToResponsesPolicy{
 		Enabled:     false,
 		AllChannels: true,
@@ -76,4 +80,20 @@ func ShouldPreserveThinkingSuffix(modelName string) bool {
 		}
 	}
 	return false
+}
+
+// IsImageEditDataURLConversionAllowed controls server-side JSON Data URL to
+// multipart/file-upload conversion by user ID. Blacklist entries take
+// precedence. An empty whitelist allows every authenticated user.
+func IsImageEditDataURLConversionAllowed(userID int) bool {
+	if userID <= 0 {
+		return false
+	}
+	if slices.Contains(globalSettings.ImageEditDataURLUserBlacklist, userID) {
+		return false
+	}
+	if len(globalSettings.ImageEditDataURLUserWhitelist) == 0 {
+		return true
+	}
+	return slices.Contains(globalSettings.ImageEditDataURLUserWhitelist, userID)
 }

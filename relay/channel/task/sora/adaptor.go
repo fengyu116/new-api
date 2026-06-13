@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel"
 	taskcommon "github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayhelper "github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
@@ -158,6 +159,9 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 		var bodyMap map[string]interface{}
 		if err := common.Unmarshal(cachedBody, &bodyMap); err == nil {
 			bodyMap["model"] = info.UpstreamModelName
+			if relayhelper.HasJSONImageDataURLReferences(cachedBody) {
+				return buildJSONDataURLVideoMultipart(c, bodyMap)
+			}
 			if newBody, err := common.Marshal(bodyMap); err == nil {
 				return bytes.NewReader(newBody), nil
 			}
@@ -217,6 +221,81 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	}
 
 	return common.ReaderOnly(storage), nil
+}
+
+func buildJSONDataURLVideoMultipart(c *gin.Context, bodyMap map[string]interface{}) (io.Reader, error) {
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	fileIndex := 1
+	for key, value := range bodyMap {
+		switch key {
+		case "image", "images", "image[]", "input_reference", "reference", "references", "image_prompt":
+			values, err := interfaceStringValues(value)
+			if err != nil {
+				return nil, fmt.Errorf("%s must be a string or array of strings", key)
+			}
+			for _, reference := range values {
+				if relayhelper.IsImageDataURL(reference) {
+					if err := relayhelper.WriteImageDataURLFile(writer, "input_reference", fmt.Sprintf("reference-%d", fileIndex), reference); err != nil {
+						return nil, fmt.Errorf("invalid %s image %d: %w", key, fileIndex, err)
+					}
+					fileIndex++
+				} else if strings.TrimSpace(reference) != "" {
+					if err := writer.WriteField(key, reference); err != nil {
+						return nil, fmt.Errorf("failed to write field %s: %w", key, err)
+					}
+				}
+			}
+		default:
+			if err := writeMultipartScalarField(writer, key, value); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("failed to finish multipart video request: %w", err)
+	}
+	c.Request.Header.Set("Content-Type", writer.FormDataContentType())
+	return &buf, nil
+}
+
+func interfaceStringValues(value interface{}) ([]string, error) {
+	switch typed := value.(type) {
+	case string:
+		return []string{typed}, nil
+	case []interface{}:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			s, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("non-string array item")
+			}
+			values = append(values, s)
+		}
+		return values, nil
+	case []string:
+		return typed, nil
+	default:
+		return nil, fmt.Errorf("unsupported value type")
+	}
+}
+
+func writeMultipartScalarField(writer *multipart.Writer, key string, value interface{}) error {
+	switch typed := value.(type) {
+	case nil:
+		return nil
+	case string:
+		return writer.WriteField(key, typed)
+	case float64, bool:
+		return writer.WriteField(key, fmt.Sprintf("%v", typed))
+	default:
+		data, err := common.Marshal(typed)
+		if err != nil {
+			return fmt.Errorf("failed to serialize field %s: %w", key, err)
+		}
+		return writer.WriteField(key, string(data))
+	}
 }
 
 // DoRequest delegates to common helper.

@@ -218,6 +218,9 @@ func ValidateBasicTaskRequest(c *gin.Context, info *RelayInfo, action string) *d
 		// 兼容单图上传
 		req.Images = []string{req.Image}
 	}
+	if len(req.Images) == 0 && strings.TrimSpace(req.InputReference) != "" {
+		req.Images = []string{req.InputReference}
+	}
 
 	storeTaskRequest(c, info, action, req)
 	return nil

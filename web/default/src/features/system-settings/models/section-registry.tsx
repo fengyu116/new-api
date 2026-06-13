@@ -50,6 +50,14 @@ const MODELS_SECTIONS = [
               settings['global.thinking_model_blacklist'],
               '[]'
             ),
+            image_edit_data_url_user_whitelist: formatJsonForEditor(
+              settings['global.image_edit_data_url_user_whitelist'],
+              '[]'
+            ),
+            image_edit_data_url_user_blacklist: formatJsonForEditor(
+              settings['global.image_edit_data_url_user_blacklist'],
+              '[]'
+            ),
             chat_completions_to_responses_policy: formatJsonForEditor(
               settings['global.chat_completions_to_responses_policy'],
               '{}'

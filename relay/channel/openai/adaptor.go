@@ -2,7 +2,6 @@ package openai
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +27,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/common_handler"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	relayhelper "github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/reasoning"
@@ -562,11 +562,10 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 }
 
 func convertJSONImageEditRequest(c *gin.Context, request dto.ImageRequest) (*bytes.Buffer, error) {
-	images, err := imageEditDataURLs(request)
+	images, err := relayhelper.ImageReferences(request)
 	if err != nil {
 		return nil, err
 	}
-
 	var requestBody bytes.Buffer
 	writer := multipart.NewWriter(&requestBody)
 	closed := false
@@ -608,33 +607,6 @@ func convertJSONImageEditRequest(c *gin.Context, request dto.ImageRequest) (*byt
 	return &requestBody, nil
 }
 
-func imageEditDataURLs(request dto.ImageRequest) ([]string, error) {
-	raw := request.Images
-	if len(raw) == 0 || string(raw) == "null" || string(raw) == "[]" {
-		raw = request.Image
-	}
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil, errors.New("image is required")
-	}
-
-	var images []string
-	if err := common.Unmarshal(raw, &images); err == nil {
-		if len(images) == 0 {
-			return nil, errors.New("image is required")
-		}
-		return images, nil
-	}
-
-	image, err := rawJSONString(raw)
-	if err != nil {
-		return nil, errors.New("image must be a data URL string or images must be an array of data URL strings")
-	}
-	if strings.TrimSpace(image) == "" {
-		return nil, errors.New("image is required")
-	}
-	return []string{image}, nil
-}
-
 func writeJSONImageEditFields(writer *multipart.Writer, request dto.ImageRequest) error {
 	data, err := common.Marshal(request)
 	if err != nil {
@@ -674,61 +646,7 @@ func rawJSONString(raw json.RawMessage) (string, error) {
 }
 
 func writeDataURLFile(writer *multipart.Writer, fieldName string, filenamePrefix string, dataURL string) error {
-	value := strings.TrimSpace(dataURL)
-	comma := strings.IndexByte(value, ',')
-	if comma <= len("data:") || !strings.HasPrefix(strings.ToLower(value), "data:") {
-		return errors.New("only base64 data URLs are supported")
-	}
-
-	header := value[len("data:"):comma]
-	headerParts := strings.Split(header, ";")
-	mimeType := strings.ToLower(strings.TrimSpace(headerParts[0]))
-	if !strings.HasPrefix(mimeType, "image/") {
-		return fmt.Errorf("unsupported media type %q", mimeType)
-	}
-	isBase64 := false
-	for _, part := range headerParts[1:] {
-		if strings.EqualFold(strings.TrimSpace(part), "base64") {
-			isBase64 = true
-			break
-		}
-	}
-	if !isBase64 {
-		return errors.New("data URL must use base64 encoding")
-	}
-
-	extension := imageExtensionForMIME(mimeType)
-	partHeader := make(textproto.MIMEHeader)
-	partHeader.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s.%s"`, fieldName, filenamePrefix, extension))
-	partHeader.Set("Content-Type", mimeType)
-	part, err := writer.CreatePart(partHeader)
-	if err != nil {
-		return fmt.Errorf("failed to create multipart file: %w", err)
-	}
-
-	payload := value[comma+1:]
-	if payload == "" {
-		return errors.New("base64 payload is empty")
-	}
-	if _, err := io.Copy(part, base64.NewDecoder(base64.StdEncoding, strings.NewReader(payload))); err != nil {
-		return fmt.Errorf("failed to decode base64 payload: %w", err)
-	}
-	return nil
-}
-
-func imageExtensionForMIME(mimeType string) string {
-	switch mimeType {
-	case "image/jpeg":
-		return "jpg"
-	case "image/webp":
-		return "webp"
-	case "image/gif":
-		return "gif"
-	case "image/bmp":
-		return "bmp"
-	default:
-		return "png"
-	}
+	return relayhelper.WriteImageDataURLFile(writer, fieldName, filenamePrefix, dataURL)
 }
 
 func isJSONRequest(c *gin.Context) bool {

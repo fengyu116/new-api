@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayhelper "github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
 
@@ -153,19 +154,31 @@ func getImageBase64sFromForm(c *gin.Context, fieldName string) ([]string, error)
 }
 
 func oaiFormEdit2AliImageEdit(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (*AliImageRequest, error) {
-	var imageRequest AliImageRequest
-	imageRequest.Model = request.Model
-	imageRequest.ResponseFormat = request.ResponseFormat
-
 	imageBase64s, err := getImageBase64sFromForm(c, "image")
 	if err != nil {
 		return nil, fmt.Errorf("get image base64s from form failed: %w", err)
 	}
+	return oaiReferences2AliImageEdit(request, imageBase64s)
+}
+
+func oaiJSONEdit2AliImageEdit(request dto.ImageRequest) (*AliImageRequest, error) {
+	references, err := relayhelper.ImageReferences(request)
+	if err != nil {
+		return nil, err
+	}
+	return oaiReferences2AliImageEdit(request, references)
+}
+
+func oaiReferences2AliImageEdit(request dto.ImageRequest, references []string) (*AliImageRequest, error) {
+	var imageRequest AliImageRequest
+	imageRequest.Model = request.Model
+	imageRequest.ResponseFormat = request.ResponseFormat
+
 	//dto.MediaContent{}
-	mediaContents := make([]AliMediaContent, len(imageBase64s))
-	for i, b64 := range imageBase64s {
+	mediaContents := make([]AliMediaContent, len(references))
+	for i, reference := range references {
 		mediaContents[i] = AliMediaContent{
-			Image: b64,
+			Image: reference,
 		}
 	}
 	mediaContents = append(mediaContents, AliMediaContent{

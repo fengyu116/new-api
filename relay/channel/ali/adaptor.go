@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/constant"
+	relayhelper "github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/types"
@@ -189,6 +190,9 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 		return aliRequest, nil
 	} else if info.RelayMode == constant.RelayModeImagesEdits {
 		if isOldWanModel(info.OriginModelName) {
+			if relayhelper.HasImageReferences(request) {
+				return oaiJSONEdit2WanxImageEdit(info, request)
+			}
 			return oaiFormEdit2WanxImageEdit(c, info, request)
 		}
 		if isSyncImageModel(info.OriginModelName) {
@@ -206,13 +210,19 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 				return nil, fmt.Errorf("convert image edit form request failed: %w", err)
 			}
 			return aliRequest, nil
-		} else {
-			aliRequest, err := oaiImage2AliImageRequest(info, request, a.IsSyncImageModel)
+		}
+		if relayhelper.HasImageReferences(request) {
+			aliRequest, err := oaiJSONEdit2AliImageEdit(request)
 			if err != nil {
-				return nil, fmt.Errorf("convert image request to async ali image request failed: %w", err)
+				return nil, fmt.Errorf("convert JSON image edit request failed: %w", err)
 			}
 			return aliRequest, nil
 		}
+		aliRequest, err := oaiImage2AliImageRequest(info, request, a.IsSyncImageModel)
+		if err != nil {
+			return nil, fmt.Errorf("convert image request to async ali image request failed: %w", err)
+		}
+		return aliRequest, nil
 	}
 	return nil, fmt.Errorf("unsupported image relay mode: %d", info.RelayMode)
 }

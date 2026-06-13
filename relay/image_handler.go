@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
@@ -36,6 +37,9 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 	err = helper.ModelMappedHelper(c, info, request)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
+	}
+	if accessError := validateImageEditDataURLAccess(c, info, *request); accessError != nil {
+		return accessError
 	}
 
 	adaptor := GetAdaptor(info.ApiType)
@@ -159,4 +163,25 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 
 	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), logContent)
 	return nil
+}
+
+func validateImageEditDataURLAccess(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) *types.NewAPIError {
+	if info == nil || info.RelayMode != relayconstant.RelayModeImagesEdits {
+		return nil
+	}
+	if c == nil || !strings.HasPrefix(c.GetHeader("Content-Type"), "application/json") {
+		return nil
+	}
+	if !helper.HasImageDataURLReferences(request) {
+		return nil
+	}
+	if model_setting.IsImageEditDataURLConversionAllowed(info.UserId) {
+		return nil
+	}
+	return types.NewErrorWithStatusCode(
+		fmt.Errorf("user %d is not allowed to use JSON Data URL image edit conversion", info.UserId),
+		types.ErrorCodeAccessDenied,
+		http.StatusForbidden,
+		types.ErrOptionWithSkipRetry(),
+	)
 }
