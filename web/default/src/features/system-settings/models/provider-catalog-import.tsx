@@ -239,8 +239,8 @@ export function ProviderCatalogImportSection() {
         <CardHeader>
           <CardTitle>供应商目录导入</CardTitle>
           <CardDescription>
-            向量默认同时上传普通规则和特殊规则，统一
-            dry-run、统一确认并原子写入。
+            向量默认同时上传普通规则和特殊规则，特殊规则支持供应商导出的
+            txt/JS 包或已清洗 JSON，统一 dry-run、统一确认并原子写入。
           </CardDescription>
         </CardHeader>
         <CardContent className='grid gap-4'>
@@ -309,10 +309,10 @@ export function ProviderCatalogImportSection() {
                     }
                   />
                 </Field>
-                <Field label='向量特殊规则（标准 JSON）'>
+                <Field label='向量特殊规则（txt / JS 包 / JSON）'>
                   <Input
                     type='file'
-                    accept='.json'
+                    accept='.txt,.js,.json'
                     onChange={(event) =>
                       setSpecialRuleFile(event.target.files?.[0] ?? null)
                     }
