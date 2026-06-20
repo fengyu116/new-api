@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"crypto/sha256"
+	"embed"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -20,6 +21,9 @@ import (
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/task_billing_rules"
 )
+
+//go:embed vector_special_templates.json
+var vectorSpecialTemplateFS embed.FS
 
 func ParseVectorBundle(req VectorBundleRequest) (*ProviderCatalog, error) {
 	catalog, err := parseVectorNormal(ParseRequest{
@@ -47,13 +51,13 @@ func ParseVectorBundle(req VectorBundleRequest) (*ProviderCatalog, error) {
 			return nil, fmt.Errorf("普通规则包含特殊计费模型，必须同时上传特殊规则")
 		}
 	} else {
-		specialCatalog, err := parseVectorSpecial(ParseRequest{
+		specialCatalog, err := parseVectorSpecialForBundle(ParseRequest{
 			ProviderCode: req.ProviderCode,
 			ProviderName: req.ProviderName,
 			RuleType:     RuleTypeVectorSpecial,
 			BaseURL:      req.BaseURL,
 			Content:      req.SpecialContent,
-		})
+		}, normalModels, requiredSpecialModels)
 		if err != nil {
 			return nil, err
 		}
@@ -88,6 +92,9 @@ func ParseVectorBundle(req VectorBundleRequest) (*ProviderCatalog, error) {
 		catalog.SourceHashes["special"] = fmt.Sprintf("%x", sha256.Sum256(req.SpecialContent))
 	}
 	if len(req.RemotePricingContent) > 0 {
+		if err := AlignVectorCatalogToRemotePricing(catalog, req.RemotePricingContent); err != nil {
+			return nil, err
+		}
 		AttachVectorRemotePricingValidation(catalog, req.RemotePricingContent)
 	}
 	return catalog, nil
@@ -401,9 +408,17 @@ func formatPrice(value float64) string {
 }
 
 func parseVectorSpecial(req ParseRequest) (*ProviderCatalog, error) {
+	return parseVectorSpecialForBundle(req, nil, nil)
+}
+
+func parseVectorSpecialForBundle(req ParseRequest, allowedModels, requiredModels map[string]struct{}) (*ProviderCatalog, error) {
 	var raw map[string]any
 	if err := json.Unmarshal(req.Content, &raw); err != nil {
-		return nil, fmt.Errorf("特殊规则必须使用标准 JSON，不能上传前端打包 JS: %w", err)
+		cleaned, cleanErr := cleanVectorSpecialJavaScript(req.Content, allowedModels, requiredModels)
+		if cleanErr != nil {
+			return nil, fmt.Errorf("特殊规则必须使用标准 JSON，或使用可识别的向量特殊规则 JS: %w", cleanErr)
+		}
+		raw = cleaned
 	}
 	taskRules := map[string]task_billing_rules.Rule{}
 	for modelName := range specialPricingModels(raw) {
@@ -421,6 +436,124 @@ func parseVectorSpecial(req ParseRequest) (*ProviderCatalog, error) {
 		SpecialOnly: true,
 	}
 	return catalog, nil
+}
+
+func cleanVectorSpecialJavaScript(content []byte, allowedModels, requiredModels map[string]struct{}) (map[string]any, error) {
+	source := string(content)
+	discovered := discoverVectorSpecialModels(source)
+	if hasQuotaTypeFourBranch(source) {
+		for modelName := range requiredModels {
+			discovered = append(discovered, modelName)
+		}
+		discovered = uniqueStrings(discovered)
+		sort.Strings(discovered)
+	}
+	if len(discovered) == 0 {
+		return nil, fmt.Errorf("没有发现可识别的特殊模型")
+	}
+	templates, err := loadVectorSpecialTemplates()
+	if err != nil {
+		return nil, err
+	}
+	templateModels := specialPricingModels(templates)
+	models := make(map[string]any, len(discovered))
+	var uncovered []string
+	for _, modelName := range discovered {
+		if allowedModels != nil {
+			if _, ok := allowedModels[modelName]; !ok {
+				continue
+			}
+		}
+		rule, ok := templateModels[modelName]
+		if !ok {
+			uncovered = append(uncovered, modelName)
+			continue
+		}
+		models[modelName] = rule
+	}
+	if len(uncovered) > 0 {
+		return nil, fmt.Errorf("发现特殊模型但没有转换器: %s", strings.Join(uncovered, ", "))
+	}
+	return map[string]any{
+		"version": "1",
+		"models":  models,
+	}, nil
+}
+
+func discoverVectorSpecialModels(source string) []string {
+	found := map[string]struct{}{}
+	for modelName := range vectorSpecialModelNames {
+		if quotedLiteralPresent(source, modelName) {
+			found[modelName] = struct{}{}
+		}
+	}
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`else\s+if\s*\(\s*["']([^"']+)["']\s*===\s*[A-Za-z_$][\w$?.]*`),
+		regexp.MustCompile(`else\s+if\s*\(\s*[A-Za-z_$][\w$?.]*\s*===\s*["']([^"']+)["']`),
+		regexp.MustCompile(`["']([^"']+)["']\s*===\s*[A-Za-z_$][\w$?.]*\s*\?\s*[A-Za-z_$][\w$]*\.push\s*\(`),
+	}
+	for _, pattern := range patterns {
+		for _, match := range pattern.FindAllStringSubmatch(source, -1) {
+			if len(match) == 2 && looksLikeModelName(match[1]) {
+				found[match[1]] = struct{}{}
+			}
+		}
+	}
+	arrayPattern := regexp.MustCompile(`new\s+Set\s*\(\s*\[([^\]]+)\]\s*\)\.has\s*\([^)]*model_name`)
+	literalPattern := regexp.MustCompile(`["']([^"']+)["']`)
+	for _, match := range arrayPattern.FindAllStringSubmatch(source, -1) {
+		for _, literal := range literalPattern.FindAllStringSubmatch(match[1], -1) {
+			if len(literal) == 2 && looksLikeModelName(literal[1]) {
+				found[literal[1]] = struct{}{}
+			}
+		}
+	}
+	for _, nonSpecial := range []string{"aigc-image-gem", "aigc-image-hunyuan", "aigc-image-qwen"} {
+		delete(found, nonSpecial)
+	}
+	result := make([]string, 0, len(found))
+	for modelName := range found {
+		result = append(result, modelName)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func hasQuotaTypeFourBranch(source string) bool {
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`4\s*[!=]==?\s*[A-Za-z_$][\w$?.]*quota_type`),
+		regexp.MustCompile(`[A-Za-z_$][\w$?.]*quota_type\s*[!=]==?\s*4`),
+	}
+	for _, pattern := range patterns {
+		if pattern.MatchString(source) {
+			return true
+		}
+	}
+	return false
+}
+
+func loadVectorSpecialTemplates() (map[string]any, error) {
+	content, err := vectorSpecialTemplateFS.ReadFile("vector_special_templates.json")
+	if err != nil {
+		return nil, err
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(content, &raw); err != nil {
+		return nil, fmt.Errorf("内置向量特殊规则模板无效: %w", err)
+	}
+	return raw, nil
+}
+
+func quotedLiteralPresent(source, value string) bool {
+	return strings.Contains(source, `"`+value+`"`) || strings.Contains(source, `'`+value+`'`)
+}
+
+func looksLikeModelName(value string) bool {
+	if value == "" || len(value) > 100 || strings.ContainsFunc(value, unicode.IsSpace) {
+		return false
+	}
+	ok, _ := regexp.MatchString(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`, value)
+	return ok
 }
 
 type shenggeGroup struct {

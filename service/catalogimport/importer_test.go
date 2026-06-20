@@ -219,6 +219,38 @@ func TestValidateVectorRemotePricingAcceptsMatchingCatalog(t *testing.T) {
 	}
 }
 
+func TestValidateVectorRemotePricingAllowsRemoteDefaultGroupOnly(t *testing.T) {
+	catalog := &ProviderCatalog{
+		ProviderCode: "vector",
+		BaseURL:      "https://q.aibaotui.com",
+		Groups:       map[string]string{"default": "default", "官转OpenAI": "official"},
+		GroupRatios:  map[string]float64{"default": 1, "官转OpenAI": 6},
+		Models: []CatalogModel{{
+			Name:            "gpt-3.5-turbo",
+			QuotaType:       0,
+			ModelRatio:      0.25,
+			CompletionRatio: 3,
+			EnableGroups:    []string{"官转OpenAI"},
+		}},
+	}
+	remote := []byte(`{"success":true,"data":{
+		"model_completion_ratio":{"gpt-3.5-turbo":3},
+		"group_special":{"gpt-3.5-turbo":["default","官转OpenAI"]},
+		"model_group":{
+			"default":{"GroupRatio":1,"ModelPrice":{"gpt-3.5-turbo":{"priceType":0,"price":0.25}}},
+			"官转OpenAI":{"GroupRatio":6,"ModelPrice":{"gpt-3.5-turbo":{"priceType":0,"price":0.25}}}
+		}
+	}}`)
+
+	report, err := ValidateVectorRemotePricing(catalog, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Mismatches) != 0 {
+		t.Fatalf("default-only group addition should not block: %+v", report.Mismatches)
+	}
+}
+
 func TestDryRunReturnsStructuredRemotePricingBlockReport(t *testing.T) {
 	catalog := &ProviderCatalog{
 		ProviderCode: "vector",
@@ -344,8 +376,12 @@ func TestCurrentVectorNormalFixtureCompilesAllTieredPrices(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(catalog.Models) != 539 {
-		t.Fatalf("models = %d, want 539", len(catalog.Models))
+	var raw vectorNormalFile
+	if err := json.Unmarshal(normal, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Models) != len(raw.Data) {
+		t.Fatalf("models = %d, want %d", len(catalog.Models), len(raw.Data))
 	}
 	if len(catalog.BillingModes) != 45 {
 		t.Fatalf("tiered billing models = %d, want 45", len(catalog.BillingModes))
@@ -483,6 +519,91 @@ func TestParseVectorBundleRequiresSpecialRulesForSpecialModels(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "特殊规则") {
 		t.Fatalf("expected missing special rules to block bundle, got %v", err)
+	}
+}
+
+func TestParseVectorBundleCleansJavaScriptSpecialRules(t *testing.T) {
+	normal := []byte(`{
+		"vendors":[],
+		"data":[{
+			"model_name":"viduq2",
+			"quota_type":1,
+			"model_price":0.016,
+			"enable_groups":["default"],
+			"supported_endpoint_types":["vidu文生视频"]
+		}]
+	}`)
+	specialJS := []byte(`const model = "viduq2"; if (model === "viduq2") { console.log("special"); }`)
+
+	catalog, err := ParseVectorBundle(VectorBundleRequest{
+		ProviderCode:   "vector",
+		ProviderName:   "向量",
+		BaseURL:        "https://example.com",
+		NormalContent:  normal,
+		SpecialContent: specialJS,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := specialPricingModels(catalog.SpecialPricing)["viduq2"]; !ok {
+		t.Fatalf("expected viduq2 special pricing after JS clean: %+v", catalog.SpecialPricing)
+	}
+	rule, ok := catalog.TaskBillingRules["viduq2"]
+	if !ok || rule.Mode != task_billing_rules.ModeSpecial {
+		t.Fatalf("expected special task billing rule, got %+v", catalog.TaskBillingRules)
+	}
+}
+
+func TestParseVectorBundleAlignsCatalogToRemotePricing(t *testing.T) {
+	normal := []byte(`{
+		"group_ratio":{"default":1,"stale":0.5},
+		"usable_group":{"default":"默认","stale":"过期"},
+		"data":[{
+			"model_name":"gpt-live",
+			"quota_type":0,
+			"model_ratio":0.1,
+			"completion_ratio":2,
+			"enable_groups":["default","stale"],
+			"supported_endpoint_types":["openai"]
+		},{
+			"model_name":"gpt-removed",
+			"quota_type":0,
+			"model_ratio":0.2,
+			"completion_ratio":2,
+			"enable_groups":["default"],
+			"supported_endpoint_types":["openai"]
+		}]
+	}`)
+	remote := []byte(`{"success":true,"data":{
+		"model_completion_ratio":{"gpt-live":3},
+		"group_special":{"gpt-live":["default"]},
+		"model_group":{"default":{"GroupRatio":1,"ModelPrice":{
+			"gpt-live":{"priceType":0,"price":0.25}
+		}}}
+	}}`)
+
+	catalog, err := ParseVectorBundle(VectorBundleRequest{
+		ProviderCode:         "vector",
+		ProviderName:         "向量",
+		BaseURL:              "https://q.aibaotui.com",
+		NormalContent:        normal,
+		SpecialContent:       []byte(`{"version":"1","models":{}}`),
+		RemotePricingContent: remote,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.ValidationErrors) != 0 {
+		t.Fatalf("remote-aligned catalog should validate cleanly: %+v", catalog.ValidationErrors)
+	}
+	if len(catalog.Models) != 1 || catalog.Models[0].Name != "gpt-live" {
+		t.Fatalf("expected removed model to be pruned, got %+v", catalog.Models)
+	}
+	if got := catalog.Models[0].EnableGroups; len(got) != 1 || got[0] != "default" {
+		t.Fatalf("expected stale group to be pruned, got %+v", got)
+	}
+	if catalog.Models[0].ModelRatio != 0.25 || catalog.Models[0].CompletionRatio != 3 {
+		t.Fatalf("expected remote price and completion ratio, got %+v", catalog.Models[0])
 	}
 }
 
