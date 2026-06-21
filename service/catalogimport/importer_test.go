@@ -302,7 +302,7 @@ func TestDryRunReturnsStructuredRemotePricingBlockReport(t *testing.T) {
 		ValidationErrors: []string{"远端价格严格校验失败"},
 	}
 
-	report, err := DryRun(ImportRequest{Catalog: catalog})
+	report, err := DryRun(ImportRequest{Catalog: catalog, GroupConflictMode: GroupConflictOverwrite})
 	if err == nil {
 		t.Fatal("expected dry-run to be blocked")
 	}
@@ -834,7 +834,7 @@ func TestDryRunReportsProviderScope(t *testing.T) {
 			ChannelType:  1,
 		}},
 	}
-	report, err := DryRun(ImportRequest{Catalog: catalog})
+	report, err := DryRun(ImportRequest{Catalog: catalog, GroupConflictMode: GroupConflictOverwrite})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -898,11 +898,8 @@ func TestDryRunWithGroupKeysFiltersCatalogToProvidedGroups(t *testing.T) {
 	if report.Groups != 1 || report.Models != 1 || report.ChannelsToCreate != 1 {
 		t.Fatalf("unexpected filtered report: %+v", report)
 	}
-	if _, ok := catalog.Groups["default"]; ok {
-		t.Fatalf("default group should be filtered out: %+v", catalog.Groups)
-	}
-	if len(catalog.Models) != 1 || catalog.Models[0].Name != "image-model" || catalog.Models[0].EnableGroups[0] != "画图" {
-		t.Fatalf("unexpected filtered models: %+v", catalog.Models)
+	if _, ok := catalog.Groups["default"]; !ok {
+		t.Fatalf("dry-run should not mutate original catalog: %+v", catalog.Groups)
 	}
 	if len(report.MissingKeyGroups) != 0 {
 		t.Fatalf("provided key group should not be missing: %+v", report.MissingKeyGroups)
@@ -1116,6 +1113,140 @@ func TestApplyReplacesOnlySameProviderAndBaseURLChannels(t *testing.T) {
 	}
 	if protectedCount != 3 {
 		t.Fatalf("unrelated channels were modified, remaining protected=%d", protectedCount)
+	}
+}
+
+func TestDryRunMarksConflictingGroupsAndKeepsKeyBinding(t *testing.T) {
+	catalog := &ProviderCatalog{
+		ProviderCode: "521",
+		ProviderName: "521渠道",
+		BaseURL:      "https://example.com",
+		Groups:       map[string]string{"default": "供应商默认", "图片": "图片分组"},
+		GroupRatios:  map[string]float64{"default": 2, "图片": 0.5},
+		AutoGroups:   []string{"default", "图片"},
+		Models: []CatalogModel{{
+			Name:                   "image-model",
+			ModelPrice:             0.2,
+			EnableGroups:           []string{"default", "图片"},
+			SupportedEndpointTypes: []string{"openai"},
+		}},
+	}
+
+	report, err := DryRun(ImportRequest{
+		Catalog: catalog,
+		GroupKeys: []TokenRow{{
+			RowNumber: 2,
+			Name:      "521 default",
+			Status:    "已启用",
+			Group:     "default",
+			Key:       "sk-default",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.GroupConflictMode != GroupConflictMark {
+		t.Fatalf("expected mark mode by default, got %s", report.GroupConflictMode)
+	}
+	if report.GroupNameMappings["default"] != "521渠道:default" {
+		t.Fatalf("expected default group to be marked, got %+v", report.GroupNameMappings)
+	}
+	if len(report.MissingKeyGroups) != 0 {
+		t.Fatalf("marked group should keep original key binding, missing=%+v", report.MissingKeyGroups)
+	}
+	if _, ok := catalog.Groups["521渠道:default"]; ok {
+		t.Fatal("dry-run mutated original catalog")
+	}
+}
+
+func TestDryRunOverwriteKeepsConflictingGroupName(t *testing.T) {
+	catalog := &ProviderCatalog{
+		ProviderCode: "521",
+		ProviderName: "521渠道",
+		BaseURL:      "https://example.com",
+		Groups:       map[string]string{"default": "供应商默认"},
+		GroupRatios:  map[string]float64{"default": 2},
+		Models: []CatalogModel{{
+			Name:                   "image-model",
+			ModelPrice:             0.2,
+			EnableGroups:           []string{"default"},
+			SupportedEndpointTypes: []string{"openai"},
+		}},
+	}
+
+	report, err := DryRun(ImportRequest{
+		Catalog:           catalog,
+		GroupConflictMode: GroupConflictOverwrite,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.GroupConflictMode != GroupConflictOverwrite {
+		t.Fatalf("expected overwrite mode, got %s", report.GroupConflictMode)
+	}
+	if len(report.GroupNameMappings) != 0 {
+		t.Fatalf("overwrite mode should not mark groups, got %+v", report.GroupNameMappings)
+	}
+	if len(report.MissingKeyGroups) != 1 || report.MissingKeyGroups[0] != "default" {
+		t.Fatalf("expected missing key for original default group, got %+v", report.MissingKeyGroups)
+	}
+}
+
+func TestApplyMarkedGroupPreservesExistingProviderKey(t *testing.T) {
+	db := setupCatalogApplyTestDB(t)
+	key := "sk-existing"
+	priority := int64(0)
+	weight := uint(0)
+	baseURL := "https://example.com"
+	oldTag := ProviderGroupTag("521", "default", constant.ChannelTypeOpenAI, "openai", nil, nil)
+	if err := db.Create(&model.Channel{
+		Type:        constant.ChannelTypeOpenAI,
+		Key:         key,
+		Status:      common.ChannelStatusEnabled,
+		Name:        "old 521 default",
+		BaseURL:     &baseURL,
+		Models:      "old-model",
+		Group:       "default",
+		Tag:         &oldTag,
+		Priority:    &priority,
+		Weight:      &weight,
+		CreatedTime: common.GetTimestamp(),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := Apply(ImportRequest{Catalog: &ProviderCatalog{
+		ProviderCode: "521",
+		ProviderName: "521渠道",
+		BaseURL:      baseURL,
+		Groups:       map[string]string{"default": "供应商默认"},
+		GroupRatios:  map[string]float64{"default": 2},
+		Models: []CatalogModel{{
+			Name:                   "new-model",
+			ModelPrice:             0.2,
+			EnableGroups:           []string{"default"},
+			SupportedEndpointTypes: []string{"openai"},
+		}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.GroupNameMappings["default"] != "521渠道:default" {
+		t.Fatalf("expected default to be marked, got %+v", report.GroupNameMappings)
+	}
+	var channel model.Channel
+	if err := db.Where("models = ?", "new-model").First(&channel).Error; err != nil {
+		t.Fatal(err)
+	}
+	if channel.Group != "521渠道:default" || channel.Key != key {
+		t.Fatalf("expected marked group with preserved key, got group=%s key=%s", channel.Group, channel.Key)
+	}
+	var ability model.Ability
+	if err := db.Where("model = ?", "new-model").First(&ability).Error; err != nil {
+		t.Fatal(err)
+	}
+	if ability.Group != "521渠道:default" {
+		t.Fatalf("expected ability to use marked group, got %s", ability.Group)
 	}
 }
 

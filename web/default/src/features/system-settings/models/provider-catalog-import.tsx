@@ -47,6 +47,8 @@ type ProviderCatalogReport = {
   channels_to_replace: number
   missing_key_groups?: string[]
   invalid_rows?: Array<{ row: number; field: string; message: string }>
+  group_conflict_mode?: string
+  group_name_mappings?: Record<string, string>
   special_pricing_models: number
   task_billing_rules: number
   tiered_billing_models: number
@@ -147,6 +149,7 @@ export function ProviderCatalogImportSection() {
   const [normalRuleFile, setNormalRuleFile] = useState<File | null>(null)
   const [specialRuleFile, setSpecialRuleFile] = useState<File | null>(null)
   const [keyFile, setKeyFile] = useState<File | null>(null)
+  const [groupConflictMode, setGroupConflictMode] = useState<'mark' | 'overwrite'>('mark')
   const [confirm, setConfirm] = useState('')
   const [report, setReport] = useState<ProviderCatalogReport | null>(null)
   const [message, setMessage] = useState('')
@@ -182,6 +185,7 @@ export function ProviderCatalogImportSection() {
     form.append('provider_name', providerName.trim())
     form.append('rule_type', ruleType.trim())
     form.append('base_url', baseUrl.trim())
+    form.append('group_conflict_mode', groupConflictMode)
     if (ruleType === 'vector_bundle') {
       if (normalRuleFile) form.append('normal_rule_file', normalRuleFile)
       if (specialRuleFile) form.append('special_rule_file', specialRuleFile)
@@ -282,7 +286,7 @@ export function ProviderCatalogImportSection() {
             </Field>
           </div>
 
-          <div className='grid gap-3 md:grid-cols-2'>
+          <div className='grid gap-3 md:grid-cols-3'>
             <Field label='规则类型'>
               <select
                 className={selectClassName}
@@ -302,6 +306,23 @@ export function ProviderCatalogImportSection() {
                 onChange={(event) => setBaseUrl(event.target.value)}
                 placeholder='https://api.example.com'
               />
+            </Field>
+            <Field label='重复分组处理'>
+              <select
+                className={selectClassName}
+                value={groupConflictMode}
+                onChange={(event) =>
+                  setGroupConflictMode(
+                    event.target.value as 'mark' | 'overwrite'
+                  )
+                }
+              >
+                <option value='mark'>新增供应商标记分组（推荐）</option>
+                <option value='overwrite'>覆盖同名分组</option>
+              </select>
+              <div className='text-muted-foreground text-xs'>
+                标记模式只在同名冲突时改为“供应商名:原分组名”；覆盖模式会沿用原分组名和倍率。
+              </div>
             </Field>
           </div>
 
@@ -480,6 +501,12 @@ function ImportReportView({ report }: { report: ProviderCatalogReport }) {
     ['任务计费规则', report.task_billing_rules],
     ['阶梯计费模型', report.tiered_billing_models],
     ['远端校验模型', report.remote_pricing_report?.checked_models ?? 0],
+    [
+      '重复分组处理',
+      report.group_conflict_mode === 'overwrite'
+        ? '覆盖同名分组'
+        : '新增供应商标记分组',
+    ],
     ['托管标签前缀', report.managed_tag_prefix],
   ]
 
@@ -511,6 +538,16 @@ function ImportReportView({ report }: { report: ProviderCatalogReport }) {
         <ReportList
           title='会更新的 Option'
           values={report.changed_option_keys}
+        />
+        <ReportList
+          title='分组重命名'
+          values={
+            report.group_name_mappings
+              ? Object.entries(report.group_name_mappings).map(
+                  ([from, to]) => `${from} → ${to}`
+                )
+              : []
+          }
         />
         <ReportList
           title='源文件 SHA-256'

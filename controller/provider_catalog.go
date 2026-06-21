@@ -144,7 +144,12 @@ func buildProviderCatalogImportRequest(c *gin.Context, apply bool) (catalogimpor
 			return catalogimport.ImportRequest{}, err
 		}
 	}
-	return catalogimport.ImportRequest{Catalog: catalog, GroupKeys: tokenRows, Apply: apply}, nil
+	return catalogimport.ImportRequest{
+		Catalog:           catalog,
+		GroupKeys:         tokenRows,
+		GroupConflictMode: strings.TrimSpace(c.PostForm("group_conflict_mode")),
+		Apply:             apply,
+	}, nil
 }
 
 func hasMultipartFile(c *gin.Context, field string) bool {

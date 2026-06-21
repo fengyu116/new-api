@@ -21,9 +21,10 @@ import (
 )
 
 type ImportRequest struct {
-	Catalog   *ProviderCatalog
-	GroupKeys []TokenRow
-	Apply     bool
+	Catalog           *ProviderCatalog
+	GroupKeys         []TokenRow
+	GroupConflictMode string
+	Apply             bool
 }
 
 type ImportReport struct {
@@ -48,6 +49,8 @@ type ImportReport struct {
 	SourceHashes         map[string]string     `json:"source_hashes,omitempty"`
 	PreviousSourceHashes map[string]string     `json:"previous_source_hashes,omitempty"`
 	SourceHashesChanged  bool                  `json:"source_hashes_changed"`
+	GroupConflictMode    string                `json:"group_conflict_mode"`
+	GroupNameMappings    map[string]string     `json:"group_name_mappings,omitempty"`
 	SkippedSpecialModels []string              `json:"skipped_special_models,omitempty"`
 	BlockedReasons       []string              `json:"blocked_reasons,omitempty"`
 	ChangedOptionKeys    []string              `json:"changed_option_keys"`
@@ -100,6 +103,18 @@ type endpointSpec struct {
 	Source      string
 }
 
+const (
+	GroupConflictOverwrite = "overwrite"
+	GroupConflictMark      = "mark"
+)
+
+type preparedImport struct {
+	Catalog           *ProviderCatalog
+	KeyRows           map[string]string
+	GroupNameMappings map[string]string
+	GroupConflictMode string
+}
+
 func DryRun(req ImportRequest) (ImportReport, error) {
 	return buildReport(req, loadPreservedKeys(req.Catalog))
 }
@@ -116,14 +131,15 @@ func Apply(req ImportRequest) (ImportReport, error) {
 		return report, fmt.Errorf("分组 key 文件存在校验错误")
 	}
 
-	plans := buildChannelPlans(req.Catalog, keyMapFromRows(req.GroupKeys))
-	optionValues, err := buildOptionValues(req.Catalog)
+	prepared := prepareImport(req)
+	plans := buildChannelPlans(prepared.Catalog, prepared.KeyRows)
+	optionValues, err := buildOptionValues(prepared.Catalog)
 	if err != nil {
 		return report, err
 	}
 	if err := model.DB.Transaction(func(tx *gorm.DB) error {
 		if !req.Catalog.SpecialOnly {
-			if err := applyCatalogTx(tx, req.Catalog, plans); err != nil {
+			if err := applyCatalogTx(tx, prepared.Catalog, plans, prepared.GroupNameMappings); err != nil {
 				return err
 			}
 		}
@@ -167,32 +183,29 @@ func buildReport(req ImportRequest, preservedKeys map[string]string) (ImportRepo
 	if req.Catalog == nil {
 		return ImportReport{}, fmt.Errorf("catalog 不能为空")
 	}
-	prefix := ProviderTagPrefix(req.Catalog.ProviderCode)
-	previousState := loadProviderImportState(req.Catalog.ProviderCode, req.Catalog.BaseURL)
-	keyRows := keyMapFromRows(req.GroupKeys)
-	if len(req.GroupKeys) > 0 {
-		restrictCatalogToKeyGroups(req.Catalog, keyRows)
-		if len(keyRows) > 0 && (len(req.Catalog.Groups) == 0 || len(req.Catalog.Models) == 0) {
-			req.Catalog.ValidationErrors = append(req.Catalog.ValidationErrors, "分组 key 文件中的分组与当前目录没有可导入交集")
-		}
-	}
-	keyReport, keyErr := BuildGroupKeyReport(req.Catalog.ProviderCode, req.Catalog.BaseURL, req.GroupKeys)
+	prepared := prepareImport(req)
+	catalog := prepared.Catalog
+	prefix := ProviderTagPrefix(catalog.ProviderCode)
+	previousState := loadProviderImportState(catalog.ProviderCode, catalog.BaseURL)
+	keyReport, keyErr := BuildGroupKeyReport(catalog.ProviderCode, catalog.BaseURL, req.GroupKeys)
 	report := ImportReport{
 		Mode:                 "dry-run",
-		ProviderCode:         req.Catalog.ProviderCode,
-		ProviderName:         req.Catalog.ProviderName,
-		BaseURL:              strings.TrimRight(req.Catalog.BaseURL, "/"),
-		Models:               len(req.Catalog.Models),
-		Vendors:              len(req.Catalog.Vendors),
-		Groups:               len(req.Catalog.Groups),
+		ProviderCode:         catalog.ProviderCode,
+		ProviderName:         catalog.ProviderName,
+		BaseURL:              strings.TrimRight(catalog.BaseURL, "/"),
+		Models:               len(catalog.Models),
+		Vendors:              len(catalog.Vendors),
+		Groups:               len(catalog.Groups),
 		ManagedTagPrefix:     prefix,
-		ChangedOptionKeys:    changedOptionKeys(req.Catalog),
-		SourceHashes:         req.Catalog.SourceHashes,
-		RemotePricingReport:  req.Catalog.RemotePricingReport,
+		ChangedOptionKeys:    changedOptionKeys(catalog),
+		SourceHashes:         catalog.SourceHashes,
+		RemotePricingReport:  catalog.RemotePricingReport,
 		PreviousSourceHashes: previousState.SourceHashes,
-		SourceHashesChanged:  hashesChanged(previousState.SourceHashes, req.Catalog.SourceHashes),
-		SkippedSpecialModels: append([]string(nil), req.Catalog.SkippedSpecialModels...),
-		BlockedReasons:       append([]string(nil), req.Catalog.ValidationErrors...),
+		SourceHashesChanged:  hashesChanged(previousState.SourceHashes, catalog.SourceHashes),
+		GroupConflictMode:    prepared.GroupConflictMode,
+		GroupNameMappings:    prepared.GroupNameMappings,
+		SkippedSpecialModels: append([]string(nil), catalog.SkippedSpecialModels...),
+		BlockedReasons:       append([]string(nil), catalog.ValidationErrors...),
 	}
 	if len(report.BlockedReasons) > 0 {
 		return report, fmt.Errorf("%s", strings.Join(report.BlockedReasons, "; "))
@@ -201,42 +214,291 @@ func buildReport(req ImportRequest, preservedKeys map[string]string) (ImportRepo
 		report.InvalidRows = keyReport.InvalidRows
 	}
 	var count int64
-	if model.DB != nil && !req.Catalog.SpecialOnly {
+	if model.DB != nil && !catalog.SpecialOnly {
 		_ = model.DB.Model(&model.Channel{}).
 			Where("tag LIKE ?", prefix+"%").
-			Where("base_url = ?", strings.TrimRight(req.Catalog.BaseURL, "/")).
+			Where("base_url = ?", strings.TrimRight(catalog.BaseURL, "/")).
 			Count(&count).Error
 	}
 	report.ChannelsToReplace = count
-	plans := buildChannelPlans(req.Catalog, keyRows)
-	if err := validateChannelPlans(req.Catalog, plans); err != nil {
+	plans := buildChannelPlans(catalog, prepared.KeyRows)
+	if err := validateChannelPlans(catalog, plans); err != nil {
 		report.ResolvedEndpoints = resolvedEndpointReports(plans)
-		report.UnresolvedEndpoints = unresolvedEndpointReports(req.Catalog)
+		report.UnresolvedEndpoints = unresolvedEndpointReports(catalog)
 		return report, err
 	}
 	report.ChannelsToCreate = len(plans)
 	report.ChannelTypeModels = channelTypeModelCounts(plans)
 	report.ResolvedEndpoints = resolvedEndpointReports(plans)
-	report.UnresolvedEndpoints = unresolvedEndpointReports(req.Catalog)
+	report.UnresolvedEndpoints = unresolvedEndpointReports(catalog)
 	missing := make(map[string]struct{})
 	for _, plan := range plans {
 		if plan.Key == "" {
-			plan.Key = lookupPreservedKey(preservedKeys, plan)
+			plan.Key = lookupPreservedKey(remapPreservedKeys(preservedKeys, prepared.GroupNameMappings), plan)
 		}
 		if plan.Key == "" {
 			missing[plan.Group] = struct{}{}
 		}
 	}
 	report.MissingKeyGroups = sortedStructKeys(missing)
-	report.SpecialPricingModels = countSpecialPricingModels(req.Catalog.SpecialPricing)
-	report.TaskBillingRules = len(req.Catalog.TaskBillingRules)
-	report.TieredBillingModels = len(req.Catalog.BillingModes)
-	if req.Catalog.SpecialOnly {
-		if err := validateSpecialOnlyProviderScope(req.Catalog); err != nil {
+	report.SpecialPricingModels = countSpecialPricingModels(catalog.SpecialPricing)
+	report.TaskBillingRules = len(catalog.TaskBillingRules)
+	report.TieredBillingModels = len(catalog.BillingModes)
+	if catalog.SpecialOnly {
+		if err := validateSpecialOnlyProviderScope(catalog); err != nil {
 			return report, err
 		}
 	}
 	return report, nil
+}
+
+func prepareImport(req ImportRequest) preparedImport {
+	catalog := cloneProviderCatalog(req.Catalog)
+	keyRows := keyMapFromRows(req.GroupKeys)
+	if len(req.GroupKeys) > 0 {
+		restrictCatalogToKeyGroups(catalog, keyRows)
+		if len(keyRows) > 0 && (len(catalog.Groups) == 0 || len(catalog.Models) == 0) {
+			catalog.ValidationErrors = append(catalog.ValidationErrors, "分组 key 文件中的分组与当前目录没有可导入交集")
+		}
+	}
+	mode := normalizeGroupConflictMode(req.GroupConflictMode)
+	mappings := applyGroupConflictMode(catalog, keyRows, mode)
+	return preparedImport{
+		Catalog:           catalog,
+		KeyRows:           remapKeyRows(keyRows, mappings),
+		GroupNameMappings: mappings,
+		GroupConflictMode: mode,
+	}
+}
+
+func normalizeGroupConflictMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case GroupConflictOverwrite:
+		return GroupConflictOverwrite
+	default:
+		return GroupConflictMark
+	}
+}
+
+func cloneProviderCatalog(catalog *ProviderCatalog) *ProviderCatalog {
+	if catalog == nil {
+		return nil
+	}
+	clone := *catalog
+	clone.AutoGroups = append([]string(nil), catalog.AutoGroups...)
+	clone.Vendors = append([]CatalogVendor(nil), catalog.Vendors...)
+	clone.Groups = cloneStringMap(catalog.Groups)
+	clone.GroupRatios = cloneFloatMap(catalog.GroupRatios)
+	clone.SpecialPricing = cloneAnyMap(catalog.SpecialPricing)
+	clone.TaskBillingRules = cloneTaskBillingRules(catalog.TaskBillingRules)
+	clone.BillingModes = cloneStringMap(catalog.BillingModes)
+	clone.BillingExprs = cloneStringMap(catalog.BillingExprs)
+	clone.SourceHashes = cloneStringMap(catalog.SourceHashes)
+	clone.ValidationErrors = append([]string(nil), catalog.ValidationErrors...)
+	clone.SkippedSpecialModels = append([]string(nil), catalog.SkippedSpecialModels...)
+	clone.Models = make([]CatalogModel, len(catalog.Models))
+	for i, item := range catalog.Models {
+		clone.Models[i] = item
+		clone.Models[i].EnableGroups = append([]string(nil), item.EnableGroups...)
+		clone.Models[i].SupportedEndpointTypes = append([]string(nil), item.SupportedEndpointTypes...)
+		clone.Models[i].ModelMapping = cloneStringMap(item.ModelMapping)
+		clone.Models[i].ParamOverride = cloneAnyMap(item.ParamOverride)
+		clone.Models[i].EndpointMap = cloneAnyMap(item.EndpointMap)
+		clone.Models[i].StepRatios = append([]StepRatio(nil), item.StepRatios...)
+		clone.Models[i].Extra = cloneAnyMap(item.Extra)
+	}
+	return &clone
+}
+
+func applyGroupConflictMode(catalog *ProviderCatalog, keyRows map[string]string, mode string) map[string]string {
+	if catalog == nil || mode != GroupConflictMark {
+		return nil
+	}
+	conflicts := conflictingCatalogGroups(catalog)
+	if len(conflicts) == 0 {
+		return nil
+	}
+	mappings := map[string]string{}
+	for group := range conflicts {
+		mappings[group] = markedGroupName(catalog, group)
+	}
+	remapCatalogGroups(catalog, mappings)
+	return mappings
+}
+
+func conflictingCatalogGroups(catalog *ProviderCatalog) map[string]struct{} {
+	conflicts := map[string]struct{}{}
+	userGroups := setting.GetUserUsableGroupsCopy()
+	groupRatios := ratio_setting.GetGroupRatioCopy()
+	for group := range catalog.Groups {
+		group = strings.TrimSpace(group)
+		if group == "" {
+			continue
+		}
+		if _, ok := userGroups[group]; ok {
+			conflicts[group] = struct{}{}
+			continue
+		}
+		if _, ok := groupRatios[group]; ok {
+			conflicts[group] = struct{}{}
+		}
+	}
+	for group := range catalog.GroupRatios {
+		group = strings.TrimSpace(group)
+		if group == "" {
+			continue
+		}
+		if _, ok := userGroups[group]; ok {
+			conflicts[group] = struct{}{}
+			continue
+		}
+		if _, ok := groupRatios[group]; ok {
+			conflicts[group] = struct{}{}
+		}
+	}
+	for _, item := range catalog.Models {
+		for _, group := range item.EnableGroups {
+			group = strings.TrimSpace(group)
+			if group == "" {
+				continue
+			}
+			if _, ok := userGroups[group]; ok {
+				conflicts[group] = struct{}{}
+				continue
+			}
+			if _, ok := groupRatios[group]; ok {
+				conflicts[group] = struct{}{}
+			}
+		}
+	}
+	return conflicts
+}
+
+func markedGroupName(catalog *ProviderCatalog, group string) string {
+	marker := strings.TrimSpace(catalog.ProviderName)
+	if marker == "" {
+		marker = strings.TrimSpace(catalog.ProviderCode)
+	}
+	if marker == "" {
+		marker = "provider"
+	}
+	return marker + ":" + strings.TrimSpace(group)
+}
+
+func remapCatalogGroups(catalog *ProviderCatalog, mappings map[string]string) {
+	if catalog == nil || len(mappings) == 0 {
+		return
+	}
+	if len(catalog.Groups) > 0 {
+		next := map[string]string{}
+		for group, desc := range catalog.Groups {
+			next[remapGroupName(group, mappings)] = desc
+		}
+		catalog.Groups = next
+	}
+	if len(catalog.GroupRatios) > 0 {
+		next := map[string]float64{}
+		for group, ratio := range catalog.GroupRatios {
+			next[remapGroupName(group, mappings)] = ratio
+		}
+		catalog.GroupRatios = next
+	}
+	catalog.AutoGroups = remapGroupList(catalog.AutoGroups, mappings)
+	for i := range catalog.Models {
+		catalog.Models[i].EnableGroups = remapGroupList(catalog.Models[i].EnableGroups, mappings)
+	}
+}
+
+func remapGroupName(group string, mappings map[string]string) string {
+	group = strings.TrimSpace(group)
+	if mapped := mappings[group]; mapped != "" {
+		return mapped
+	}
+	return group
+}
+
+func remapGroupList(groups []string, mappings map[string]string) []string {
+	out := make([]string, 0, len(groups))
+	for _, group := range groups {
+		group = remapGroupName(group, mappings)
+		if group != "" {
+			out = append(out, group)
+		}
+	}
+	return uniqueStrings(out)
+}
+
+func remapKeyRows(keys map[string]string, mappings map[string]string) map[string]string {
+	if len(keys) == 0 {
+		return keys
+	}
+	out := map[string]string{}
+	for group, key := range keys {
+		out[remapGroupName(group, mappings)] = key
+	}
+	return out
+}
+
+func remapPreservedKeys(keys map[string]string, mappings map[string]string) map[string]string {
+	if len(keys) == 0 || len(mappings) == 0 {
+		return keys
+	}
+	out := make(map[string]string, len(keys)*2)
+	for key, value := range keys {
+		out[key] = value
+		parts := strings.SplitN(key, "|", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		if mapped := mappings[strings.TrimSpace(parts[0])]; mapped != "" {
+			out[mapped+"|"+parts[1]] = value
+		}
+	}
+	return out
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneFloatMap(values map[string]float64) map[string]float64 {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]float64, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneAnyMap(values map[string]any) map[string]any {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]any, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneTaskBillingRules(values map[string]task_billing_rules.Rule) map[string]task_billing_rules.Rule {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]task_billing_rules.Rule, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 func restrictCatalogToKeyGroups(catalog *ProviderCatalog, keys map[string]string) {
@@ -329,7 +591,7 @@ func validateSpecialOnlyProviderScope(catalog *ProviderCatalog) error {
 	return nil
 }
 
-func applyCatalogTx(tx *gorm.DB, catalog *ProviderCatalog, plans []channelPlan) error {
+func applyCatalogTx(tx *gorm.DB, catalog *ProviderCatalog, plans []channelPlan, groupNameMappings map[string]string) error {
 	preservedKeys := map[string]string{}
 	var existing []model.Channel
 	if err := tx.
@@ -373,7 +635,7 @@ func applyCatalogTx(tx *gorm.DB, catalog *ProviderCatalog, plans []channelPlan) 
 	}
 	for _, plan := range plans {
 		if plan.Key == "" {
-			plan.Key = lookupPreservedKey(preservedKeys, plan)
+			plan.Key = lookupPreservedKey(remapPreservedKeys(preservedKeys, groupNameMappings), plan)
 		}
 		if err := insertChannelPlanTx(tx, catalog, plan); err != nil {
 			return err
