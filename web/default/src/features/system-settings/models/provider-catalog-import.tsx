@@ -94,6 +94,24 @@ type BillingAuditReport = {
   }>
 }
 
+type ClearCatalogReport = {
+  mode: string
+  provider_code: string
+  base_url: string
+  managed_tag_prefix: string
+  channels_to_delete: number
+  abilities_to_delete: number
+  groups_to_delete: number
+  model_pricing_items_to_delete: number
+  special_pricing_to_delete: number
+  task_billing_rules_to_delete: number
+  tiered_billing_to_delete: number
+  groups?: string[]
+  models?: string[]
+  changed_option_keys?: string[]
+  applied: boolean
+}
+
 const PRESETS: Record<
   ProviderPreset,
   {
@@ -138,6 +156,7 @@ const RULE_TYPES = [
 ]
 
 const APPLY_CONFIRM = 'APPLY_PROVIDER_CATALOG'
+const CLEAR_CONFIRM = 'CLEAR_PROVIDER_CATALOG'
 
 export function ProviderCatalogImportSection() {
   const [preset, setPreset] = useState<ProviderPreset>('vector')
@@ -156,6 +175,13 @@ export function ProviderCatalogImportSection() {
   const [loading, setLoading] = useState<'preview' | 'apply' | null>(null)
   const [auditLoading, setAuditLoading] = useState(false)
   const [auditReport, setAuditReport] = useState<BillingAuditReport | null>(
+    null
+  )
+  const [clearConfirm, setClearConfirm] = useState('')
+  const [clearLoading, setClearLoading] = useState<'preview' | 'apply' | null>(
+    null
+  )
+  const [clearReport, setClearReport] = useState<ClearCatalogReport | null>(
     null
   )
 
@@ -241,6 +267,35 @@ export function ProviderCatalogImportSection() {
       setMessage(error instanceof Error ? error.message : '历史计费扫描失败')
     } finally {
       setAuditLoading(false)
+    }
+  }
+
+  const buildClearForm = (mode: 'preview' | 'apply') => {
+    const form = new FormData()
+    form.append('provider_code', providerCode.trim())
+    form.append('base_url', baseUrl.trim())
+    if (mode === 'apply') form.append('confirm', clearConfirm.trim())
+    return form
+  }
+
+  const submitClear = async (mode: 'preview' | 'apply') => {
+    setClearLoading(mode)
+    setMessage('')
+    try {
+      const res = await api.post<ApiResponse<ClearCatalogReport>>(
+        `/api/provider-catalog/clear/${mode}`,
+        buildClearForm(mode)
+      )
+      if (!res.data.success) {
+        setMessage(res.data.message || '清空失败')
+        return
+      }
+      setClearReport(res.data.data)
+      setMessage(mode === 'apply' ? '已清空供应商托管数据' : '清空预览已生成')
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '清空请求失败')
+    } finally {
+      setClearLoading(null)
     }
   }
 
@@ -456,6 +511,53 @@ export function ProviderCatalogImportSection() {
         </CardContent>
       </Card>
 
+      <Card className='border-destructive/40'>
+        <CardHeader>
+          <CardTitle>危险操作：清空供应商托管数据</CardTitle>
+          <CardDescription>
+            只清空当前 provider_code + base_url 下由供应商导入托管的渠道、abilities、模型计费配置和带供应商标记的分组；不删除用户、余额、支付、令牌和手工渠道。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className='grid gap-3'>
+          <div className='flex flex-wrap gap-2'>
+            <Button
+              type='button'
+              variant='outline'
+              disabled={
+                providerCode.trim() === '' ||
+                baseUrl.trim() === '' ||
+                clearLoading !== null
+              }
+              onClick={() => submitClear('preview')}
+            >
+              {clearLoading === 'preview' ? '预览中...' : '清空 dry-run 预览'}
+            </Button>
+          </div>
+          {clearReport && <ClearReportView report={clearReport} />}
+          <Field label={`输入 ${CLEAR_CONFIRM} 后允许清空`}>
+            <Textarea
+              className='min-h-10'
+              value={clearConfirm}
+              onChange={(event) => setClearConfirm(event.target.value)}
+              placeholder={CLEAR_CONFIRM}
+            />
+          </Field>
+          <Button
+            type='button'
+            variant='destructive'
+            disabled={
+              providerCode.trim() === '' ||
+              baseUrl.trim() === '' ||
+              clearConfirm.trim() !== CLEAR_CONFIRM ||
+              clearLoading !== null
+            }
+            onClick={() => submitClear('apply')}
+          >
+            {clearLoading === 'apply' ? '清空中...' : '确认清空供应商托管数据'}
+          </Button>
+        </CardContent>
+      </Card>
+
       {message && (
         <div
           className={cn(
@@ -475,6 +577,37 @@ export function ProviderCatalogImportSection() {
       )}
 
       {report && <ImportReportView report={report} />}
+    </div>
+  )
+}
+
+function ClearReportView({ report }: { report: ClearCatalogReport }) {
+  const items = [
+    ['范围', `${report.provider_code} / ${report.base_url}`],
+    ['将删除渠道', report.channels_to_delete],
+    ['将删除 abilities', report.abilities_to_delete],
+    ['将删除分组', report.groups_to_delete],
+    ['模型计费项', report.model_pricing_items_to_delete],
+    ['特殊计费', report.special_pricing_to_delete],
+    ['任务计费规则', report.task_billing_rules_to_delete],
+    ['阶梯计费', report.tiered_billing_to_delete],
+  ]
+  return (
+    <div className='grid gap-3 rounded-lg border p-3'>
+      <div className='grid gap-2 md:grid-cols-4'>
+        {items.map(([label, value]) => (
+          <div key={label} className='rounded-lg border p-2'>
+            <div className='text-muted-foreground text-xs'>{label}</div>
+            <div className='mt-1 text-sm font-medium break-all'>{value}</div>
+          </div>
+        ))}
+      </div>
+      <ReportList title='将删除分组' values={report.groups} />
+      <ReportList
+        title='将更新的 Option'
+        values={report.changed_option_keys}
+      />
+      <ReportList title='涉及模型' values={report.models?.slice(0, 100)} />
     </div>
   )
 }

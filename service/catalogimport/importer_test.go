@@ -1250,6 +1250,125 @@ func TestApplyMarkedGroupPreservesExistingProviderKey(t *testing.T) {
 	}
 }
 
+func TestClearManagedCatalogDryRunAndApply(t *testing.T) {
+	db := setupCatalogApplyTestDB(t)
+	priority := int64(0)
+	weight := uint(0)
+	baseURL := "https://example.com"
+	managedTag := ProviderGroupTag("521", "521渠道:default", constant.ChannelTypeOpenAI, "openai", nil, nil)
+	manualTag := "manual"
+	managed := model.Channel{
+		Type:     constant.ChannelTypeOpenAI,
+		Key:      "sk-managed",
+		Status:   common.ChannelStatusEnabled,
+		Name:     "managed",
+		BaseURL:  &baseURL,
+		Models:   "managed-model",
+		Group:    "521渠道:default",
+		Tag:      &managedTag,
+		Priority: &priority,
+		Weight:   &weight,
+	}
+	manual := model.Channel{
+		Type:     constant.ChannelTypeOpenAI,
+		Key:      "sk-manual",
+		Status:   common.ChannelStatusEnabled,
+		Name:     "manual",
+		BaseURL:  &baseURL,
+		Models:   "manual-model",
+		Group:    "default",
+		Tag:      &manualTag,
+		Priority: &priority,
+		Weight:   &weight,
+	}
+	if err := db.Create(&managed).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&manual).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.Ability{Group: managed.Group, Model: "managed-model", ChannelId: managed.Id, Enabled: true, Tag: &managedTag}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.Ability{Group: manual.Group, Model: "manual-model", ChannelId: manual.Id, Enabled: true, Tag: &manualTag}).Error; err != nil {
+		t.Fatal(err)
+	}
+	common.OptionMap["ModelPrice"] = `{"managed-model":0.2,"manual-model":0.3}`
+	common.OptionMap["ModelRatio"] = `{"managed-model":1,"manual-model":2}`
+	common.OptionMap["CompletionRatio"] = `{"managed-model":2,"manual-model":3}`
+	common.OptionMap["CacheRatio"] = `{"managed-model":0.1,"manual-model":0.2}`
+	common.OptionMap["CreateCacheRatio"] = `{"managed-model":0.1,"manual-model":0.2}`
+	common.OptionMap["AudioCompletionRatio"] = `{"managed-model":1.5,"manual-model":2.5}`
+	common.OptionMap["GroupRatio"] = `{"521渠道:default":2,"default":1}`
+	common.OptionMap["UserUsableGroups"] = `{"521渠道:default":"供应商默认","default":"默认"}`
+	common.OptionMap[special_pricing.OptionKey] = `{"version":"1","models":{"managed-model":{"type":"fixed"},"manual-model":{"type":"fixed"}}}`
+	common.OptionMap[task_billing_rules.OptionKey] = `{"managed-model":{"mode":"per_call"},"manual-model":{"mode":"per_call"}}`
+	common.OptionMap["billing_setting.billing_mode"] = `{"managed-model":"tiered_expr","manual-model":"tiered_expr"}`
+	common.OptionMap["billing_setting.billing_expr"] = `{"managed-model":"1","manual-model":"1"}`
+	common.OptionMap[ProviderImportStateOptionKey("521", baseURL)] = `{
+		"special_pricing_models":["managed-model"],
+		"task_billing_models":["managed-model"],
+		"tiered_billing_models":["managed-model"]
+	}`
+	t.Cleanup(func() {
+		for _, key := range []string{
+			"ModelPrice", "ModelRatio", "CompletionRatio", "CacheRatio", "CreateCacheRatio",
+			"AudioCompletionRatio", "GroupRatio", "UserUsableGroups", special_pricing.OptionKey,
+			task_billing_rules.OptionKey, "billing_setting.billing_mode", "billing_setting.billing_expr",
+			ProviderImportStateOptionKey("521", baseURL),
+		} {
+			delete(common.OptionMap, key)
+		}
+	})
+
+	preview, err := ClearManagedCatalog(ClearRequest{ProviderCode: "521", BaseURL: baseURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Applied || preview.ChannelsToDelete != 1 || preview.AbilitiesToDelete != 1 {
+		t.Fatalf("unexpected preview: %+v", preview)
+	}
+	var channelCount int64
+	if err := db.Model(&model.Channel{}).Count(&channelCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if channelCount != 2 {
+		t.Fatalf("dry-run modified channels, count=%d", channelCount)
+	}
+
+	applied, err := ClearManagedCatalog(ClearRequest{ProviderCode: "521", BaseURL: baseURL, Apply: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !applied.Applied || applied.ChannelsToDelete != 1 || applied.GroupsToDelete != 1 {
+		t.Fatalf("unexpected apply report: %+v", applied)
+	}
+	var remaining []model.Channel
+	if err := db.Find(&remaining).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 1 || remaining[0].Name != "manual" {
+		t.Fatalf("manual channel should remain only, got %+v", remaining)
+	}
+	var abilities int64
+	if err := db.Model(&model.Ability{}).Count(&abilities).Error; err != nil {
+		t.Fatal(err)
+	}
+	if abilities != 1 {
+		t.Fatalf("manual ability should remain only, got %d", abilities)
+	}
+	values := common.OptionMap
+	if strings.Contains(values["ModelPrice"], "managed-model") || !strings.Contains(values["ModelPrice"], "manual-model") {
+		t.Fatalf("model price cleanup incorrect: %s", values["ModelPrice"])
+	}
+	if strings.Contains(values["UserUsableGroups"], "521渠道:default") || !strings.Contains(values["UserUsableGroups"], "default") {
+		t.Fatalf("user groups cleanup incorrect: %s", values["UserUsableGroups"])
+	}
+	if strings.Contains(values[special_pricing.OptionKey], "managed-model") || !strings.Contains(values[special_pricing.OptionKey], "manual-model") {
+		t.Fatalf("special pricing cleanup incorrect: %s", values[special_pricing.OptionKey])
+	}
+}
+
 func TestPostgresVendorSequenceIsSyncedBeforeImport(t *testing.T) {
 	dsn := os.Getenv("TEST_POSTGRES_DSN")
 	if strings.TrimSpace(dsn) == "" {

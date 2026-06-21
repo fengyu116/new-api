@@ -15,6 +15,7 @@ import (
 )
 
 const providerCatalogApplyConfirm = "APPLY_PROVIDER_CATALOG"
+const providerCatalogClearConfirm = "CLEAR_PROVIDER_CATALOG"
 
 var fetchVectorRemotePricing = func(ctx context.Context, baseURL string) ([]byte, error) {
 	return catalogimport.FetchVectorRemotePricing(ctx, service.GetHttpClient(), baseURL)
@@ -61,6 +62,36 @@ func ProviderCatalogApply(c *gin.Context) {
 	}
 	_ = catalogimport.SaveLastReport(report)
 	common.ApiSuccess(c, report)
+}
+
+func ProviderCatalogClearPreview(c *gin.Context) {
+	report, err := catalogimport.ClearManagedCatalog(buildProviderCatalogClearRequest(c, false))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, report)
+}
+
+func ProviderCatalogClearApply(c *gin.Context) {
+	if c.PostForm("confirm") != providerCatalogClearConfirm {
+		common.ApiError(c, fmt.Errorf("确认文本错误，需要填写 %s", providerCatalogClearConfirm))
+		return
+	}
+	report, err := catalogimport.ClearManagedCatalog(buildProviderCatalogClearRequest(c, true))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, report)
+}
+
+func buildProviderCatalogClearRequest(c *gin.Context, apply bool) catalogimport.ClearRequest {
+	return catalogimport.ClearRequest{
+		ProviderCode: strings.TrimSpace(c.PostForm("provider_code")),
+		BaseURL:      strings.TrimSpace(c.PostForm("base_url")),
+		Apply:        apply,
+	}
 }
 
 func buildProviderCatalogImportRequest(c *gin.Context, apply bool) (catalogimport.ImportRequest, error) {

@@ -58,6 +58,8 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			providerCatalogRoute.POST("/preview", controller.ProviderCatalogPreview)
 			providerCatalogRoute.POST("/apply", controller.ProviderCatalogApply)
+			providerCatalogRoute.POST("/clear/preview", controller.ProviderCatalogClearPreview)
+			providerCatalogRoute.POST("/clear/apply", controller.ProviderCatalogClearApply)
 			providerCatalogRoute.GET("/billing-audit", controller.ProviderCatalogBillingAudit)
 		}
 

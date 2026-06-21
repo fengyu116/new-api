@@ -182,6 +182,27 @@ func TestBuildProviderCatalogImportRequestValidatesVectorNormalAgainstRemotePric
 	}
 }
 
+func TestBuildProviderCatalogClearRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("provider_code", "521")
+	_ = writer.WriteField("base_url", "https://example.com/")
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/provider-catalog/clear/preview", &body)
+	ctx.Request.Header.Set("Content-Type", writer.FormDataContentType())
+
+	req := buildProviderCatalogClearRequest(ctx, true)
+	if req.ProviderCode != "521" || req.BaseURL != "https://example.com/" || !req.Apply {
+		t.Fatalf("unexpected clear request: %+v", req)
+	}
+}
+
 func writeMultipartFile(t *testing.T, writer *multipart.Writer, field, filename string, content []byte) {
 	t.Helper()
 	part, err := writer.CreateFormFile(field, filename)
