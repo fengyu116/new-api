@@ -185,6 +185,13 @@ export function ProviderCatalogImportSection() {
     null
   )
 
+  const clearDisabledReason = useMemo(() => {
+    if (providerCode.trim() === '') return '请先填写 provider_code'
+    if (baseUrl.trim() === '') return '请先填写 base_url'
+    if (clearLoading !== null) return '清空请求处理中'
+    return ''
+  }, [baseUrl, clearLoading, providerCode])
+
   const canSubmit = useMemo(
     () =>
       providerCode.trim() !== '' &&
@@ -519,15 +526,32 @@ export function ProviderCatalogImportSection() {
           </CardDescription>
         </CardHeader>
         <CardContent className='grid gap-3'>
+          <div className='grid gap-3 md:grid-cols-2'>
+            <Field label='清空目标 provider_code'>
+              <Input
+                value={providerCode}
+                onChange={(event) => setProviderCode(event.target.value)}
+                placeholder='vector / 521 / shengge'
+              />
+            </Field>
+            <Field label='清空目标 base_url'>
+              <Input
+                value={baseUrl}
+                onChange={(event) => setBaseUrl(event.target.value)}
+                placeholder='https://api.example.com'
+              />
+            </Field>
+          </div>
+          {clearDisabledReason && (
+            <div className='text-muted-foreground text-sm'>
+              按钮不可用原因：{clearDisabledReason}
+            </div>
+          )}
           <div className='flex flex-wrap gap-2'>
             <Button
               type='button'
               variant='outline'
-              disabled={
-                providerCode.trim() === '' ||
-                baseUrl.trim() === '' ||
-                clearLoading !== null
-              }
+              disabled={clearDisabledReason !== ''}
               onClick={() => submitClear('preview')}
             >
               {clearLoading === 'preview' ? '预览中...' : '清空 dry-run 预览'}
@@ -546,10 +570,8 @@ export function ProviderCatalogImportSection() {
             type='button'
             variant='destructive'
             disabled={
-              providerCode.trim() === '' ||
-              baseUrl.trim() === '' ||
-              clearConfirm.trim() !== CLEAR_CONFIRM ||
-              clearLoading !== null
+              clearDisabledReason !== '' ||
+              clearConfirm.trim() !== CLEAR_CONFIRM
             }
             onClick={() => submitClear('apply')}
           >
