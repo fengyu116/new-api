@@ -211,10 +211,11 @@ func isTaskLikeModel(item CatalogModel) bool {
 }
 
 const (
-	RuleTypeVectorNormal  = "vector_normal"
-	RuleTypeVectorSpecial = "vector_special"
-	RuleTypeVectorBundle  = "vector_bundle"
-	RuleTypeShenggeNormal = "shengge_normal"
+	RuleTypeVectorNormal     = "vector_normal"
+	RuleTypeVectorSpecial    = "vector_special"
+	RuleTypeVectorBundle     = "vector_bundle"
+	RuleTypeFiveTwoOneNormal = "521_normal"
+	RuleTypeShenggeNormal    = "shengge_normal"
 )
 
 func ParseCatalog(req ParseRequest) (*ProviderCatalog, error) {
@@ -226,6 +227,8 @@ func ParseCatalog(req ParseRequest) (*ProviderCatalog, error) {
 	}
 	switch req.RuleType {
 	case RuleTypeVectorNormal:
+		return parseVectorNormal(req)
+	case RuleTypeFiveTwoOneNormal:
 		return parseVectorNormal(req)
 	case RuleTypeVectorSpecial:
 		return parseVectorSpecial(req)

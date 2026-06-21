@@ -33,7 +33,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 
-type ProviderPreset = 'vector' | 'shengge' | 'custom'
+type ProviderPreset = 'vector' | 'fiveTwoOne' | 'shengge' | 'custom'
 
 type ProviderCatalogReport = {
   mode: string
@@ -107,6 +107,12 @@ const PRESETS: Record<
     ruleType: 'vector_bundle',
     baseUrl: '',
   },
+  fiveTwoOne: {
+    providerCode: '521',
+    providerName: '521渠道',
+    ruleType: '521_normal',
+    baseUrl: '',
+  },
   shengge: {
     providerCode: 'shengge',
     providerName: '胜哥',
@@ -125,6 +131,7 @@ const RULE_TYPES = [
   { value: 'vector_bundle', label: '向量完整目录（普通 + 特殊）' },
   { value: 'vector_normal', label: '仅向量普通规则（不含固定价模型）' },
   { value: 'vector_special', label: '仅更新向量特殊规则（高级）' },
+  { value: '521_normal', label: '521普通规则 JSON' },
   { value: 'shengge_normal', label: '胜哥普通规则 JSON' },
 ]
 
@@ -254,6 +261,7 @@ export function ProviderCatalogImportSection() {
                 }
               >
                 <option value='vector'>向量</option>
+                <option value='fiveTwoOne'>521渠道</option>
                 <option value='shengge'>胜哥</option>
                 <option value='custom'>其他</option>
               </select>

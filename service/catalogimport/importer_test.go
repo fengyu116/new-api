@@ -63,6 +63,40 @@ func TestParseVectorNormalCatalog(t *testing.T) {
 	}
 }
 
+func TestParseFiveTwoOneNormalCatalog(t *testing.T) {
+	input := []byte(`{
+		"auto_groups":["default"],
+		"vendors":[{"id":1,"name":"521"}],
+		"group_ratio":{"default":1,"异步图片系列":0.25},
+		"usable_group":{"default":"默认","异步图片系列":"图片"},
+		"supported_endpoint":{"openai":{"path":"/v1/chat/completions","method":"POST"}},
+		"data":[{
+			"model_name":"Banana-pro-4k",
+			"quota_type":1,
+			"model_price":0.2,
+			"enable_groups":["default","异步图片系列"],
+			"supported_endpoint_types":["openai"]
+		}]
+	}`)
+
+	catalog, err := ParseCatalog(ParseRequest{
+		ProviderCode: "521",
+		ProviderName: "521渠道",
+		RuleType:     RuleTypeFiveTwoOneNormal,
+		BaseURL:      "https://example.com",
+		Content:      input,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalog.ProviderCode != "521" || len(catalog.Models) != 1 || len(catalog.Vendors) != 1 {
+		t.Fatalf("unexpected catalog: %+v", catalog)
+	}
+	if catalog.Models[0].Name != "Banana-pro-4k" || catalog.Models[0].ModelPrice != 0.2 {
+		t.Fatalf("unexpected model: %+v", catalog.Models[0])
+	}
+}
+
 func TestParseVectorNormalCompilesStepRatiosToTieredBilling(t *testing.T) {
 	input := []byte(`{
 		"auto_groups":["default"],
@@ -812,6 +846,66 @@ func TestDryRunReportsProviderScope(t *testing.T) {
 	}
 	if len(report.MissingKeyGroups) != 1 || report.MissingKeyGroups[0] != "default" {
 		t.Fatalf("expected default missing key, got %+v", report.MissingKeyGroups)
+	}
+}
+
+func TestDryRunWithGroupKeysFiltersCatalogToProvidedGroups(t *testing.T) {
+	catalog := &ProviderCatalog{
+		ProviderCode: "521",
+		ProviderName: "521渠道",
+		BaseURL:      "https://example.com",
+		AutoGroups:   []string{"default", "画图"},
+		Groups: map[string]string{
+			"default": "默认",
+			"画图":      "图片",
+			"Claude":  "Claude",
+		},
+		GroupRatios: map[string]float64{
+			"default": 1,
+			"画图":      0.25,
+			"Claude":  4,
+		},
+		Models: []CatalogModel{{
+			Name:                   "image-model",
+			QuotaType:              1,
+			ModelPrice:             0.2,
+			EnableGroups:           []string{"default", "画图"},
+			SupportedEndpointTypes: []string{"openai"},
+		}, {
+			Name:                   "claude-model",
+			QuotaType:              0,
+			ModelRatio:             1,
+			CompletionRatio:        2,
+			EnableGroups:           []string{"Claude"},
+			SupportedEndpointTypes: []string{"anthropic"},
+		}},
+	}
+
+	report, err := DryRun(ImportRequest{
+		Catalog: catalog,
+		GroupKeys: []TokenRow{{
+			RowNumber: 2,
+			Name:      "画图",
+			Status:    "已启用",
+			Group:     "画图",
+			Key:       "sk-test",
+			Models:    "无限制",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Groups != 1 || report.Models != 1 || report.ChannelsToCreate != 1 {
+		t.Fatalf("unexpected filtered report: %+v", report)
+	}
+	if _, ok := catalog.Groups["default"]; ok {
+		t.Fatalf("default group should be filtered out: %+v", catalog.Groups)
+	}
+	if len(catalog.Models) != 1 || catalog.Models[0].Name != "image-model" || catalog.Models[0].EnableGroups[0] != "画图" {
+		t.Fatalf("unexpected filtered models: %+v", catalog.Models)
+	}
+	if len(report.MissingKeyGroups) != 0 {
+		t.Fatalf("provided key group should not be missing: %+v", report.MissingKeyGroups)
 	}
 }
 

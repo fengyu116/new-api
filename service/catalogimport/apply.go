@@ -170,6 +170,12 @@ func buildReport(req ImportRequest, preservedKeys map[string]string) (ImportRepo
 	prefix := ProviderTagPrefix(req.Catalog.ProviderCode)
 	previousState := loadProviderImportState(req.Catalog.ProviderCode, req.Catalog.BaseURL)
 	keyRows := keyMapFromRows(req.GroupKeys)
+	if len(req.GroupKeys) > 0 {
+		restrictCatalogToKeyGroups(req.Catalog, keyRows)
+		if len(keyRows) > 0 && (len(req.Catalog.Groups) == 0 || len(req.Catalog.Models) == 0) {
+			req.Catalog.ValidationErrors = append(req.Catalog.ValidationErrors, "分组 key 文件中的分组与当前目录没有可导入交集")
+		}
+	}
 	keyReport, keyErr := BuildGroupKeyReport(req.Catalog.ProviderCode, req.Catalog.BaseURL, req.GroupKeys)
 	report := ImportReport{
 		Mode:                 "dry-run",
@@ -231,6 +237,63 @@ func buildReport(req ImportRequest, preservedKeys map[string]string) (ImportRepo
 		}
 	}
 	return report, nil
+}
+
+func restrictCatalogToKeyGroups(catalog *ProviderCatalog, keys map[string]string) {
+	if catalog == nil || len(keys) == 0 {
+		return
+	}
+	allowed := make(map[string]struct{}, len(keys))
+	for group := range keys {
+		group = strings.TrimSpace(group)
+		if group != "" {
+			allowed[group] = struct{}{}
+		}
+	}
+	filterGroups := func(values []string) []string {
+		out := make([]string, 0, len(values))
+		for _, group := range values {
+			group = strings.TrimSpace(group)
+			if _, ok := allowed[group]; ok {
+				out = append(out, group)
+			}
+		}
+		return uniqueStrings(out)
+	}
+	if len(catalog.Groups) > 0 {
+		next := map[string]string{}
+		for group, desc := range catalog.Groups {
+			if _, ok := allowed[group]; ok {
+				next[group] = desc
+			}
+		}
+		catalog.Groups = next
+	}
+	if len(catalog.GroupRatios) > 0 {
+		next := map[string]float64{}
+		for group, ratio := range catalog.GroupRatios {
+			if _, ok := allowed[group]; ok {
+				next[group] = ratio
+			}
+		}
+		catalog.GroupRatios = next
+	}
+	catalog.AutoGroups = filterGroups(catalog.AutoGroups)
+	models := make([]CatalogModel, 0, len(catalog.Models))
+	kept := map[string]struct{}{}
+	for _, item := range catalog.Models {
+		item.EnableGroups = filterGroups(item.EnableGroups)
+		if len(item.EnableGroups) == 0 {
+			continue
+		}
+		models = append(models, item)
+		kept[item.Name] = struct{}{}
+	}
+	catalog.Models = models
+	catalog.SpecialPricing = filterSpecialPricingModels(catalog.SpecialPricing, kept)
+	catalog.TaskBillingRules = filterTaskBillingRules(catalog.TaskBillingRules, kept)
+	catalog.BillingModes = filterStringMap(catalog.BillingModes, kept)
+	catalog.BillingExprs = filterStringMap(catalog.BillingExprs, kept)
 }
 
 func validateSpecialOnlyProviderScope(catalog *ProviderCatalog) error {
