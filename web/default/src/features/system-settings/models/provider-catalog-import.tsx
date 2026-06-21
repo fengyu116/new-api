@@ -186,11 +186,9 @@ export function ProviderCatalogImportSection() {
   )
 
   const clearDisabledReason = useMemo(() => {
-    if (providerCode.trim() === '') return '请先填写 provider_code'
-    if (baseUrl.trim() === '') return '请先填写 base_url'
     if (clearLoading !== null) return '清空请求处理中'
     return ''
-  }, [baseUrl, clearLoading, providerCode])
+  }, [clearLoading])
 
   const canSubmit = useMemo(
     () =>
@@ -279,8 +277,6 @@ export function ProviderCatalogImportSection() {
 
   const buildClearForm = (mode: 'preview' | 'apply') => {
     const form = new FormData()
-    form.append('provider_code', providerCode.trim())
-    form.append('base_url', baseUrl.trim())
     if (mode === 'apply') form.append('confirm', clearConfirm.trim())
     return form
   }
@@ -522,25 +518,13 @@ export function ProviderCatalogImportSection() {
         <CardHeader>
           <CardTitle>危险操作：清空供应商托管数据</CardTitle>
           <CardDescription>
-            只清空当前 provider_code + base_url 下由供应商导入托管的渠道、abilities、模型计费配置和带供应商标记的分组；不删除用户、余额、支付、令牌和手工渠道。
+            直接清空全部由供应商导入托管的渠道、abilities、模型计费配置和带供应商标记的分组；不删除用户、余额、支付、令牌和手工渠道。
           </CardDescription>
         </CardHeader>
         <CardContent className='grid gap-3'>
-          <div className='grid gap-3 md:grid-cols-2'>
-            <Field label='清空目标 provider_code'>
-              <Input
-                value={providerCode}
-                onChange={(event) => setProviderCode(event.target.value)}
-                placeholder='vector / 521 / shengge'
-              />
-            </Field>
-            <Field label='清空目标 base_url'>
-              <Input
-                value={baseUrl}
-                onChange={(event) => setBaseUrl(event.target.value)}
-                placeholder='https://api.example.com'
-              />
-            </Field>
+          <div className='text-muted-foreground rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm'>
+            清空范围为所有 tag 以 catalog: 开头的供应商托管数据。建议先点 dry-run
+            预览确认数量，确认后再输入确认文本执行。
           </div>
           {clearDisabledReason && (
             <div className='text-muted-foreground text-sm'>
@@ -604,8 +588,12 @@ export function ProviderCatalogImportSection() {
 }
 
 function ClearReportView({ report }: { report: ClearCatalogReport }) {
+  const scope =
+    report.provider_code || report.base_url
+      ? `${report.provider_code || '*'} / ${report.base_url || '*'}`
+      : '全部供应商托管数据'
   const items = [
-    ['范围', `${report.provider_code} / ${report.base_url}`],
+    ['范围', scope],
     ['将删除渠道', report.channels_to_delete],
     ['将删除 abilities', report.abilities_to_delete],
     ['将删除分组', report.groups_to_delete],

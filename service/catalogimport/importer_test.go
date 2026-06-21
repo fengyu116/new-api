@@ -1369,6 +1369,142 @@ func TestClearManagedCatalogDryRunAndApply(t *testing.T) {
 	}
 }
 
+func TestClearManagedCatalogClearsAllManagedProvidersByDefault(t *testing.T) {
+	db := setupCatalogApplyTestDB(t)
+	priority := int64(0)
+	weight := uint(0)
+	baseURL521 := "https://521.example.com"
+	baseURLVector := "https://vector.example.com"
+	manualBaseURL := "https://manual.example.com"
+	tag521 := ProviderGroupTag("521", "521渠道:default", constant.ChannelTypeOpenAI, "openai", nil, nil)
+	tagVector := ProviderGroupTag("vector", "向量:default", constant.ChannelTypeOpenAI, "openai", nil, nil)
+	manualTag := "manual"
+	channels := []model.Channel{
+		{
+			Type: constant.ChannelTypeOpenAI, Key: "sk-521", Status: common.ChannelStatusEnabled,
+			Name: "521 managed", BaseURL: &baseURL521, Models: "model-521", Group: "521渠道:default",
+			Tag: &tag521, Priority: &priority, Weight: &weight,
+		},
+		{
+			Type: constant.ChannelTypeOpenAI, Key: "sk-vector", Status: common.ChannelStatusEnabled,
+			Name: "vector managed", BaseURL: &baseURLVector, Models: "model-vector", Group: "向量:default",
+			Tag: &tagVector, Priority: &priority, Weight: &weight,
+		},
+		{
+			Type: constant.ChannelTypeOpenAI, Key: "sk-manual", Status: common.ChannelStatusEnabled,
+			Name: "manual", BaseURL: &manualBaseURL, Models: "model-manual", Group: "default",
+			Tag: &manualTag, Priority: &priority, Weight: &weight,
+		},
+	}
+	for i := range channels {
+		if err := db.Create(&channels[i]).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&model.Ability{Group: "521渠道:default", Model: "model-521", ChannelId: channels[0].Id, Enabled: true, Tag: &tag521}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.Ability{Group: "向量:default", Model: "model-vector", ChannelId: channels[1].Id, Enabled: true, Tag: &tagVector}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.Ability{Group: "default", Model: "model-manual", ChannelId: channels[2].Id, Enabled: true, Tag: &manualTag}).Error; err != nil {
+		t.Fatal(err)
+	}
+	common.OptionMap["ModelPrice"] = `{"model-521":0.2,"model-vector":0.4,"model-manual":0.6}`
+	common.OptionMap["ModelRatio"] = `{"model-521":1,"model-vector":2,"model-manual":3}`
+	common.OptionMap["CompletionRatio"] = `{"model-521":2,"model-vector":3,"model-manual":4}`
+	common.OptionMap["CacheRatio"] = `{"model-521":0.1,"model-vector":0.2,"model-manual":0.3}`
+	common.OptionMap["CreateCacheRatio"] = `{"model-521":0.1,"model-vector":0.2,"model-manual":0.3}`
+	common.OptionMap["AudioCompletionRatio"] = `{"model-521":1,"model-vector":2,"model-manual":3}`
+	common.OptionMap["GroupRatio"] = `{"521渠道:default":2,"向量:default":3,"default":1}`
+	common.OptionMap["UserUsableGroups"] = `{"521渠道:default":"521默认","向量:default":"向量默认","default":"默认"}`
+	common.OptionMap[special_pricing.OptionKey] = `{"version":"1","models":{"model-521":{"type":"fixed"},"model-vector":{"type":"fixed"},"model-manual":{"type":"fixed"}}}`
+	common.OptionMap[task_billing_rules.OptionKey] = `{"model-521":{"mode":"per_call"},"model-vector":{"mode":"per_call"},"model-manual":{"mode":"per_call"}}`
+	common.OptionMap["billing_setting.billing_mode"] = `{"model-521":"tiered_expr","model-vector":"tiered_expr","model-manual":"tiered_expr"}`
+	common.OptionMap["billing_setting.billing_expr"] = `{"model-521":"1","model-vector":"2","model-manual":"3"}`
+	common.OptionMap[ProviderImportStateOptionKey("521", baseURL521)] = `{
+		"special_pricing_models":["model-521"],
+		"task_billing_models":["model-521"],
+		"tiered_billing_models":["model-521"]
+	}`
+	common.OptionMap[ProviderImportStateOptionKey("vector", baseURLVector)] = `{
+		"special_pricing_models":["model-vector"],
+		"task_billing_models":["model-vector"],
+		"tiered_billing_models":["model-vector"]
+	}`
+	t.Cleanup(func() {
+		for _, key := range []string{
+			"ModelPrice", "ModelRatio", "CompletionRatio", "CacheRatio", "CreateCacheRatio",
+			"AudioCompletionRatio", "GroupRatio", "UserUsableGroups", special_pricing.OptionKey,
+			task_billing_rules.OptionKey, "billing_setting.billing_mode", "billing_setting.billing_expr",
+			ProviderImportStateOptionKey("521", baseURL521), ProviderImportStateOptionKey("vector", baseURLVector),
+		} {
+			delete(common.OptionMap, key)
+		}
+	})
+
+	preview, err := ClearManagedCatalog(ClearRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Applied || preview.ManagedTagPrefix != "catalog:" || preview.ChannelsToDelete != 2 || preview.AbilitiesToDelete != 2 {
+		t.Fatalf("unexpected global preview: %+v", preview)
+	}
+	var channelCount int64
+	if err := db.Model(&model.Channel{}).Count(&channelCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if channelCount != 3 {
+		t.Fatalf("dry-run modified channels, count=%d", channelCount)
+	}
+
+	applied, err := ClearManagedCatalog(ClearRequest{Apply: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !applied.Applied || applied.ChannelsToDelete != 2 || applied.GroupsToDelete != 2 {
+		t.Fatalf("unexpected global apply report: %+v", applied)
+	}
+	var remaining []model.Channel
+	if err := db.Find(&remaining).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 1 || remaining[0].Name != "manual" {
+		t.Fatalf("manual channel should remain only, got %+v", remaining)
+	}
+	var abilities int64
+	if err := db.Model(&model.Ability{}).Count(&abilities).Error; err != nil {
+		t.Fatal(err)
+	}
+	if abilities != 1 {
+		t.Fatalf("manual ability should remain only, got %d", abilities)
+	}
+	values := common.OptionMap
+	for _, key := range []string{"ModelPrice", "ModelRatio", "CompletionRatio", "CacheRatio", "CreateCacheRatio", "AudioCompletionRatio"} {
+		if strings.Contains(values[key], "model-521") || strings.Contains(values[key], "model-vector") || !strings.Contains(values[key], "model-manual") {
+			t.Fatalf("%s cleanup incorrect: %s", key, values[key])
+		}
+	}
+	if strings.Contains(values["GroupRatio"], "521渠道:default") || strings.Contains(values["GroupRatio"], "向量:default") || !strings.Contains(values["GroupRatio"], "default") {
+		t.Fatalf("group ratio cleanup incorrect: %s", values["GroupRatio"])
+	}
+	if strings.Contains(values[special_pricing.OptionKey], "model-521") || strings.Contains(values[special_pricing.OptionKey], "model-vector") || !strings.Contains(values[special_pricing.OptionKey], "model-manual") {
+		t.Fatalf("special pricing cleanup incorrect: %s", values[special_pricing.OptionKey])
+	}
+	if strings.Contains(values[task_billing_rules.OptionKey], "model-521") || strings.Contains(values[task_billing_rules.OptionKey], "model-vector") || !strings.Contains(values[task_billing_rules.OptionKey], "model-manual") {
+		t.Fatalf("task billing cleanup incorrect: %s", values[task_billing_rules.OptionKey])
+	}
+	if strings.Contains(values["billing_setting.billing_mode"], "model-521") || strings.Contains(values["billing_setting.billing_mode"], "model-vector") || !strings.Contains(values["billing_setting.billing_mode"], "model-manual") {
+		t.Fatalf("tiered mode cleanup incorrect: %s", values["billing_setting.billing_mode"])
+	}
+	if strings.Contains(values[ProviderImportStateOptionKey("521", baseURL521)], "model-521") {
+		t.Fatalf("521 import state was not cleared: %s", values[ProviderImportStateOptionKey("521", baseURL521)])
+	}
+	if strings.Contains(values[ProviderImportStateOptionKey("vector", baseURLVector)], "model-vector") {
+		t.Fatalf("vector import state was not cleared: %s", values[ProviderImportStateOptionKey("vector", baseURLVector)])
+	}
+}
+
 func TestPostgresVendorSequenceIsSyncedBeforeImport(t *testing.T) {
 	dsn := os.Getenv("TEST_POSTGRES_DSN")
 	if strings.TrimSpace(dsn) == "" {

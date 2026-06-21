@@ -41,9 +41,6 @@ type ClearReport struct {
 func ClearManagedCatalog(req ClearRequest) (ClearReport, error) {
 	providerCode := strings.TrimSpace(req.ProviderCode)
 	baseURL := strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
-	if providerCode == "" || baseURL == "" {
-		return ClearReport{}, fmt.Errorf("provider_code、base_url 均不能为空")
-	}
 	if model.DB == nil {
 		return ClearReport{}, fmt.Errorf("数据库未初始化")
 	}
@@ -81,6 +78,7 @@ type clearPlan struct {
 	ProviderCode              string
 	BaseURL                   string
 	ManagedTagPrefix          string
+	StateOptionKeys           []string
 	ChannelIDs                []int
 	AbilitiesToDelete         int64
 	Groups                    []string
@@ -94,12 +92,16 @@ type clearPlan struct {
 }
 
 func buildClearPlan(providerCode, baseURL string) (clearPlan, error) {
-	prefix := ProviderTagPrefix(providerCode)
+	prefix := "catalog:"
+	if providerCode != "" {
+		prefix = ProviderTagPrefix(providerCode)
+	}
 	var channels []model.Channel
-	if err := model.DB.
-		Where("tag LIKE ?", prefix+"%").
-		Where("base_url = ?", baseURL).
-		Find(&channels).Error; err != nil {
+	query := model.DB.Where("tag LIKE ?", prefix+"%")
+	if baseURL != "" {
+		query = query.Where("base_url = ?", baseURL)
+	}
+	if err := query.Find(&channels).Error; err != nil {
 		return clearPlan{}, err
 	}
 	plan := clearPlan{
@@ -128,7 +130,8 @@ func buildClearPlan(providerCode, baseURL string) (clearPlan, error) {
 			return clearPlan{}, err
 		}
 	}
-	state := loadProviderImportState(providerCode, baseURL)
+	state, stateOptionKeys := loadClearProviderStates(providerCode, baseURL)
+	plan.StateOptionKeys = stateOptionKeys
 	for _, modelName := range state.SpecialPricingModels {
 		modelName = strings.TrimSpace(modelName)
 		if modelName != "" {
@@ -149,7 +152,7 @@ func buildClearPlan(providerCode, baseURL string) (clearPlan, error) {
 	}
 	plan.Models = sortedStructKeys(models)
 	plan.Groups = sortedStructKeys(groups)
-	optionValues, counts, err := buildClearOptionValues(plan.Models, plan.Groups, state, providerCode, baseURL)
+	optionValues, counts, err := buildClearOptionValues(plan.Models, plan.Groups, state, stateOptionKeys)
 	if err != nil {
 		return clearPlan{}, err
 	}
@@ -162,6 +165,46 @@ func buildClearPlan(providerCode, baseURL string) (clearPlan, error) {
 	return plan, nil
 }
 
+func loadClearProviderStates(providerCode, baseURL string) (providerImportState, []string) {
+	if providerCode != "" && baseURL != "" {
+		key := ProviderImportStateOptionKey(providerCode, baseURL)
+		state := loadProviderImportState(providerCode, baseURL)
+		keys := []string{key}
+		legacyKey := LegacyProviderImportStateOptionKey(providerCode)
+		if strings.TrimSpace(common.OptionMap[legacyKey]) != "" {
+			keys = append(keys, legacyKey)
+		}
+		return state, keys
+	}
+	merged := providerImportState{}
+	stateKeys := []string{}
+	for key, raw := range common.OptionMap {
+		if !strings.HasPrefix(key, "ProviderCatalogImportState:") {
+			continue
+		}
+		if providerCode != "" && key != LegacyProviderImportStateOptionKey(providerCode) && !strings.HasPrefix(key, "ProviderCatalogImportState:"+providerCode+":") {
+			continue
+		}
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		var state providerImportState
+		if err := json.Unmarshal([]byte(raw), &state); err != nil {
+			continue
+		}
+		stateKeys = append(stateKeys, key)
+		merged.SpecialPricingModels = append(merged.SpecialPricingModels, state.SpecialPricingModels...)
+		merged.TaskBillingModels = append(merged.TaskBillingModels, state.TaskBillingModels...)
+		merged.TieredBillingModels = append(merged.TieredBillingModels, state.TieredBillingModels...)
+	}
+	sort.Strings(stateKeys)
+	merged.SpecialPricingModels = sortedStructKeys(sliceSet(merged.SpecialPricingModels))
+	merged.TaskBillingModels = sortedStructKeys(sliceSet(merged.TaskBillingModels))
+	merged.TieredBillingModels = sortedStructKeys(sliceSet(merged.TieredBillingModels))
+	return merged, stateKeys
+}
+
 type clearOptionCounts struct {
 	ModelPricing   int
 	SpecialPricing int
@@ -169,7 +212,7 @@ type clearOptionCounts struct {
 	TieredBilling  int
 }
 
-func buildClearOptionValues(models []string, groups []string, state providerImportState, providerCode, baseURL string) (map[string]string, clearOptionCounts, error) {
+func buildClearOptionValues(models []string, groups []string, state providerImportState, stateOptionKeys []string) (map[string]string, clearOptionCounts, error) {
 	modelSet := sliceSet(models)
 	groupSet := sliceSet(groups)
 	values := map[string]string{}
@@ -222,7 +265,9 @@ func buildClearOptionValues(models []string, groups []string, state providerImpo
 		counts.TieredBilling += removed
 		values["billing_setting.billing_expr"] = next
 	}
-	values[ProviderImportStateOptionKey(providerCode, baseURL)] = mustJSON(providerImportState{})
+	for _, key := range stateOptionKeys {
+		values[key] = mustJSON(providerImportState{})
+	}
 	return values, counts, nil
 }
 
