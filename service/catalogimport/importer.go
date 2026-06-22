@@ -216,6 +216,7 @@ const (
 	RuleTypeVectorBundle     = "vector_bundle"
 	RuleTypeFiveTwoOneNormal = "521_normal"
 	RuleTypeShenggeNormal    = "shengge_normal"
+	RuleTypeTianqiNormal     = "tianqi_normal"
 )
 
 func ParseCatalog(req ParseRequest) (*ProviderCatalog, error) {
@@ -230,6 +231,8 @@ func ParseCatalog(req ParseRequest) (*ProviderCatalog, error) {
 		return parseVectorNormal(req)
 	case RuleTypeFiveTwoOneNormal:
 		return parseVectorNormal(req)
+	case RuleTypeTianqiNormal:
+		return parseTianqiNormal(req)
 	case RuleTypeVectorSpecial:
 		return parseVectorSpecial(req)
 	case RuleTypeShenggeNormal:
@@ -237,6 +240,14 @@ func ParseCatalog(req ParseRequest) (*ProviderCatalog, error) {
 	default:
 		return nil, fmt.Errorf("不支持的规则类型: %s", req.RuleType)
 	}
+}
+
+func parseTianqiNormal(req ParseRequest) (*ProviderCatalog, error) {
+	catalog, err := parseVectorNormal(req)
+	if err != nil {
+		return nil, fmt.Errorf("天启普通规则必须是 JSON: %w", err)
+	}
+	return catalog, nil
 }
 
 type vectorNormalFile struct {

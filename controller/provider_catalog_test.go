@@ -182,6 +182,57 @@ func TestBuildProviderCatalogImportRequestValidatesVectorNormalAgainstRemotePric
 	}
 }
 
+func TestBuildProviderCatalogImportRequestAcceptsTianqiNormal(t *testing.T) {
+	originalFetch := fetchVectorRemotePricing
+	fetchVectorRemotePricing = func(_ context.Context, _ string) ([]byte, error) {
+		return nil, fmt.Errorf("tianqi import must not fetch vector pricing")
+	}
+	t.Cleanup(func() {
+		fetchVectorRemotePricing = originalFetch
+	})
+
+	gin.SetMode(gin.TestMode)
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("provider_code", "tianqi")
+	_ = writer.WriteField("provider_name", "天启渠道")
+	_ = writer.WriteField("rule_type", catalogimport.RuleTypeTianqiNormal)
+	_ = writer.WriteField("base_url", "https://mingyu.it.com")
+	writeMultipartFile(t, writer, "rule_file", "tianqi.json", []byte(`{
+		"auto_groups":["default"],
+		"vendors":[{"id":9,"name":"天启"}],
+		"group_ratio":{"default":1},
+		"usable_group":{"default":"默认"},
+		"data":[{
+			"model_name":"abra_t2v_4s_portrait",
+			"quota_type":0,
+			"model_ratio":37.5,
+			"completion_ratio":1,
+			"enable_groups":["default"],
+			"supported_endpoint_types":["openai","openai-video"]
+		}]
+	}`))
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/provider-catalog/preview", &body)
+	ctx.Request.Header.Set("Content-Type", writer.FormDataContentType())
+
+	req, err := buildProviderCatalogImportRequest(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Catalog.ProviderCode != "tianqi" || req.Catalog.BaseURL != "https://mingyu.it.com" {
+		t.Fatalf("unexpected tianqi catalog: %+v", req.Catalog)
+	}
+	if req.Catalog.RemotePricingReport != nil {
+		t.Fatalf("tianqi should not use vector remote pricing validation: %+v", req.Catalog.RemotePricingReport)
+	}
+}
+
 func TestBuildProviderCatalogClearRequest(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	var body bytes.Buffer

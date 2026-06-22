@@ -33,7 +33,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 
-type ProviderPreset = 'vector' | 'fiveTwoOne' | 'shengge' | 'custom'
+type ProviderPreset = 'vector' | 'fiveTwoOne' | 'shengge' | 'tianqi' | 'custom'
 
 type ProviderCatalogReport = {
   mode: string
@@ -139,6 +139,12 @@ const PRESETS: Record<
     ruleType: 'shengge_normal',
     baseUrl: '',
   },
+  tianqi: {
+    providerCode: 'tianqi',
+    providerName: '天启渠道',
+    ruleType: 'tianqi_normal',
+    baseUrl: 'https://mingyu.it.com',
+  },
   custom: {
     providerCode: '',
     providerName: '',
@@ -153,6 +159,7 @@ const RULE_TYPES = [
   { value: 'vector_special', label: '仅更新向量特殊规则（高级）' },
   { value: '521_normal', label: '521普通规则 JSON' },
   { value: 'shengge_normal', label: '胜哥普通规则 JSON' },
+  { value: 'tianqi_normal', label: '天启普通规则 JSON' },
 ]
 
 const APPLY_CONFIRM = 'APPLY_PROVIDER_CATALOG'
@@ -325,6 +332,7 @@ export function ProviderCatalogImportSection() {
                 <option value='vector'>向量</option>
                 <option value='fiveTwoOne'>521渠道</option>
                 <option value='shengge'>胜哥</option>
+                <option value='tianqi'>天启渠道</option>
                 <option value='custom'>其他</option>
               </select>
             </Field>

@@ -97,6 +97,59 @@ func TestParseFiveTwoOneNormalCatalog(t *testing.T) {
 	}
 }
 
+func TestParseTianqiNormalCatalog(t *testing.T) {
+	input := []byte(`{
+		"auto_groups":["default"],
+		"vendors":[{"id":9,"name":"天启","icon":"Tianqi.Color"}],
+		"group_ratio":{"default":1,"flow":0.9},
+		"usable_group":{"default":"默认分组","flow":"Flow分组"},
+		"supported_endpoint":{
+			"openai":{"path":"/v1/chat/completions","method":"POST"},
+			"openai-video":{"path":"/v1/video/generations","method":"POST"}
+		},
+		"data":[{
+			"model_name":"abra_t2v_4s_portrait",
+			"quota_type":0,
+			"model_ratio":37.5,
+			"model_price":0,
+			"owner_by":"",
+			"completion_ratio":1,
+			"enable_groups":["flow","default","flow"],
+			"supported_endpoint_types":["openai","openai-video"],
+			"pricing_version":"abc"
+		}]
+	}`)
+	catalog, err := ParseCatalog(ParseRequest{
+		ProviderCode: "tianqi",
+		ProviderName: "天启渠道",
+		RuleType:     RuleTypeTianqiNormal,
+		BaseURL:      "https://mingyu.it.com/",
+		Content:      input,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalog.ProviderCode != "tianqi" || catalog.ProviderName != "天启渠道" || catalog.BaseURL != "https://mingyu.it.com" {
+		t.Fatalf("unexpected catalog identity: %+v", catalog)
+	}
+	if len(catalog.Models) != 1 || catalog.Models[0].Name != "abra_t2v_4s_portrait" {
+		t.Fatalf("unexpected models: %+v", catalog.Models)
+	}
+	model := catalog.Models[0]
+	if model.ModelRatio != 37.5 || model.CompletionRatio != 1 {
+		t.Fatalf("unexpected pricing: %+v", model)
+	}
+	if strings.Join(model.EnableGroups, ",") != "flow,default" {
+		t.Fatalf("expected unique group order to be preserved, got %+v", model.EnableGroups)
+	}
+	if len(model.EndpointMap) != 2 || model.EndpointMap["openai-video"] == nil {
+		t.Fatalf("expected endpoint metadata to be attached, got %+v", model.EndpointMap)
+	}
+	if catalog.GroupRatios["flow"] != 0.9 || catalog.Groups["default"] != "默认分组" {
+		t.Fatalf("unexpected groups: ratios=%+v groups=%+v", catalog.GroupRatios, catalog.Groups)
+	}
+}
+
 func TestParseVectorNormalCompilesStepRatiosToTieredBilling(t *testing.T) {
 	input := []byte(`{
 		"auto_groups":["default"],
